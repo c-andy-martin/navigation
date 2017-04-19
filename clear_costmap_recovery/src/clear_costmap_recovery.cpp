@@ -140,11 +140,11 @@ void ClearCostmapRecovery::clearMap(boost::shared_ptr<costmap_2d::CostmapLayer> 
     bool xrange = x>start_x && x<end_x;
                    
     for(int y=0; y<(int)costmap->getSizeInCellsY(); y++){
-      if(xrange && y>start_y && y<end_y)
-        continue;
-      int index = costmap->getIndex(x,y);
-      if(grid[index]!=NO_INFORMATION){
-        grid[index] = NO_INFORMATION;
+      if(xrange && y>start_y && y<end_y){
+	int index = costmap->getIndex(x,y);
+	if(grid[index]!=NO_INFORMATION){
+	  grid[index] = NO_INFORMATION;
+	}
       }
     }
   }
