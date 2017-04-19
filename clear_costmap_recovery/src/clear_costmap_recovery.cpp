@@ -90,6 +90,13 @@ void ClearCostmapRecovery::runBehavior(){
   ROS_WARN("Clearing costmap to unstuck robot (%fm).", reset_distance_);
   clear(global_costmap_);
   clear(local_costmap_);
+
+  // FIXME: There appears to be a race when costmap has an obstacle on the
+  // goal. Even after this recovery has cleared it, nav sometimes aborts.
+  // Sleep a bit so that the planner won't be called immediately (maybe fixing
+  // the race).  Also, if there really is an obstacle there, this gives
+  // sensors time to see it and put it back on the map before we move.
+  ros::Duration(1.0).sleep();
 }
 
 void ClearCostmapRecovery::clear(costmap_2d::Costmap2DROS* costmap){
