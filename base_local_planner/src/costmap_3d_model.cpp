@@ -66,7 +66,16 @@ double Costmap3DModel::footprintCost(
     double inscribed_radius,
     double circumscribed_radius)
 {
-  return costmap_3d_.footprintCost(x, y, theta);
+  geometry_msgs::Pose pose;
+  pose.position.x = x;
+  pose.position.y = y;
+  pose.orientation = tf::createQuaternionMsgFromYaw(theta);
+  if ( costmap_3d_query_ )
+  {
+    // Use any direct query, if available
+    return costmap_3d_query_->footprintCost(pose);
+  }
+  return costmap_3d_.footprintCost(pose);
 }
 
 }  // end namespace base_local_planner
