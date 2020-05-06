@@ -130,6 +130,14 @@ public:
       return stop_updates_;
     }
 
+  /** @brief Return the tranform listener.
+   *
+   * The global planner API does not pass the transform listener, so this is
+   * useful for setting up a private costmap when only given a pointer to an
+   * existing global Costmap2DROS.
+   */
+  virtual tf::TransformListener& getTransformListener() { return tf_; }
+
   /**
    * @brief Get the pose of the robot in the global frame of the costmap
    * @param global_pose Will be set to the pose of the robot in the global frame of the costmap
