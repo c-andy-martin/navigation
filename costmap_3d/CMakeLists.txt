@@ -20,19 +20,17 @@ find_package(catkin REQUIRED COMPONENTS
 
 find_package(OCTOMAP REQUIRED)
 find_package(PCL 1.7 REQUIRED)
+find_package(fcl REQUIRED)
 
-# Find FCL (flexible collision library)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBFCL_PC REQUIRED fcl)
-# find *absolute* paths to LIBFCL_INCLUDE_DIRS and LIBFCL_LIBRARIES
-find_path(LIBFCL_INCLUDE_DIRS fcl/config.h HINTS ${LIBFCL_PC_INCLUDE_DIR} ${LIBFCL_PC_INCLUDE_DIRS})
-find_library(LIBFCL_LIBRARIES fcl HINTS ${LIBFCL_PC_LIBRARY_DIRS})
+# These need to be set in this way for catkin_package so that they can be
+# exported to client libraries.
+get_target_property(LIBFCL_INCLUDE_DIRS fcl INTERFACE_INCLUDE_DIRECTORIES)
+get_target_property(LIBFCL_LIBRARIES fcl INTERFACE_LINK_LIBRARIES)
 
 include_directories(
   include
   ${OCTOMAP_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
-  ${LIBFCL_INCLUDE_DIRS}
   ${catkin_INCLUDE_DIRS}
 )
 
@@ -100,7 +98,7 @@ add_library(costmap_3d
 target_link_libraries(costmap_3d
   ${OCTOMAP_LIBRARIES}
   ${PCL_LIBRARIES}
-  ${LIBFCL_LIBRARIES}
+  fcl
   ${catkin_LIBRARIES}
 )
 target_compile_options(costmap_3d PRIVATE ${EXTRA_COMPILE_OPTIONS})
