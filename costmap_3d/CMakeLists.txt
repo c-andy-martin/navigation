@@ -36,6 +36,12 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
+link_directories(
+  ${OCTOMAP_LIBRARY_DIRS}
+  ${PCL_LIBRARY_DIRS}
+  ${catkin_LIBRARY_DIRS}
+)
+
 generate_dynamic_reconfigure_options(
   cfg/Costmap3D.cfg
   cfg/CylinderClearingPlugin.cfg
