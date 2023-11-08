@@ -37,12 +37,16 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
+#include <functional>
 #include <random>
+#include <vector>
 
 #include <fcl/config.h>
 #include <fcl/geometry/octree/octree.h>
 #include <fcl/broadphase/broadphase_dynamic_AABB_tree.h>
 #include <fcl/broadphase/default_broadphase_callbacks.h>
+#include <costmap_3d/bin_pose.h>
 #include <costmap_3d/costmap_3d_query.h>
 #include <costmap_3d/octree_solver.h>
 
@@ -568,7 +572,7 @@ TEST(test_octree_solver, test_arg_sort_up_to_8)
         std::chrono::duration_cast<std::chrono::nanoseconds>(arg_sort_time).count() / iterations <<
         "ns (iterations: " << iterations << ")" << std::endl;
   }
-  constexpr size_t n = 100000;
+  constexpr size_t n = 10000;
   std::array<std::array<double, 8>, n> darrs;
   std::array<unsigned, n> ns;
   std::mt19937 gen(1);
@@ -619,6 +623,470 @@ TEST(test_octree_solver, test_arg_sort_up_to_8)
   std::cout << "Total time to std::sort the same " << n << " random arrays of size 2-8: " <<
       std::chrono::duration_cast<std::chrono::nanoseconds>(std_sort_time).count() <<
       "ns" << std::endl;
+}
+
+#define EXPECT_POSE_NEAR(p1, p2) \
+  EXPECT_NEAR(p1.position.x, p2.position.x, 1e-6); \
+  EXPECT_NEAR(p1.position.y, p2.position.y, 1e-6); \
+  EXPECT_NEAR(p1.position.z, p2.position.z, 1e-6); \
+  EXPECT_NEAR(p1.orientation.w, p2.orientation.w, 1e-6); \
+  EXPECT_NEAR(p1.orientation.x, p2.orientation.x, 1e-6); \
+  EXPECT_NEAR(p1.orientation.y, p2.orientation.y, 1e-6); \
+  EXPECT_NEAR(p1.orientation.z, p2.orientation.z, 1e-6); \
+
+#define EXPECT_POSE_NOT_NEAR(p1, p2) \
+  EXPECT_TRUE( \
+      std::abs(p1.position.x - p2.position.x) > 1e-6 || \
+      std::abs(p1.position.y - p2.position.y) > 1e-6 || \
+      std::abs(p1.position.z - p2.position.z) > 1e-6 || \
+      std::abs(p1.orientation.w - p2.orientation.w) > 1e-6 || \
+      std::abs(p1.orientation.x - p2.orientation.x) > 1e-6 || \
+      std::abs(p1.orientation.y - p2.orientation.y) > 1e-6 || \
+      std::abs(p1.orientation.z - p2.orientation.z) > 1e-6)
+
+class PoseBinKey
+{
+public:
+  PoseBinKey(const geometry_msgs::Pose& pose)
+  {
+    binned_pose_ = pose;
+    hash_ = hash_value();
+  }
+
+  // Directly store the hash value in a public location for speed.
+  size_t hash_;
+
+  bool operator==(const PoseBinKey& rhs) const
+  {
+    return binned_pose_.orientation.x == rhs.binned_pose_.orientation.x &&
+           binned_pose_.orientation.y == rhs.binned_pose_.orientation.y &&
+           binned_pose_.orientation.z == rhs.binned_pose_.orientation.z &&
+           binned_pose_.orientation.w == rhs.binned_pose_.orientation.w &&
+           binned_pose_.position.x == rhs.binned_pose_.position.x &&
+           binned_pose_.position.y == rhs.binned_pose_.position.y &&
+           binned_pose_.position.z == rhs.binned_pose_.position.z;
+  }
+
+  const geometry_msgs::Pose& getBinnedPose() const { return binned_pose_; }
+
+protected:
+  geometry_msgs::Pose binned_pose_;
+
+  size_t hash_value() const
+  {
+    // Compute the hash off the raw bits by treating the doubles as if they
+    // were unsigned 64-bit integers, multiplying them by medium sized
+    // consecutive primes and summing them up. This operation is SIMD
+    // friendly and much faster than std::hash, and works well for the types
+    // of floating point coordinates encountered in Costmap queries.
+    union {double d; uint64_t uint;} u[7] = {
+        binned_pose_.orientation.x,
+        binned_pose_.orientation.y,
+        binned_pose_.orientation.z,
+        binned_pose_.orientation.w,
+        binned_pose_.position.x,
+        binned_pose_.position.y,
+        binned_pose_.position.z,
+    };
+    uint64_t primes[8] = {
+        30011,
+        30013,
+        30029,
+        30047,
+        30059,
+        30071,
+        30089,
+        30091,
+    };
+    // Make the hash SIMD friendly by using primes and addition instead of
+    // hash_combine which must be done sequentially.
+    uint64_t rv = 0;
+    for (unsigned i=0; i<7; ++i)
+    {
+      rv += u[i].uint * primes[i];
+    }
+    return static_cast<size_t>(rv);
+  }
+};
+
+struct PoseBinKeyHash
+{
+  size_t operator()(const PoseBinKey& key) const
+  {
+    return key.hash_;
+  }
+};
+
+struct PoseBinKeyEqual
+{
+  bool operator()(const PoseBinKey& lhs, const PoseBinKey& rhs) const
+  {
+    return lhs == rhs;
+  }
+};
+
+using PoseBinEntry = std::pair<size_t, double>;
+using PoseBinMap = std::unordered_map<PoseBinKey, PoseBinEntry, PoseBinKeyHash, PoseBinKeyEqual>;
+using costmap_3d::binPose;
+using costmap_3d::binPoseAngularDistanceLimit;
+
+void test_pose_binning_impl(int bins_per_meter, int bins_per_rotation, bool verbose = false)
+{
+  geometry_msgs::Pose in, out, expected;
+  in.position.x = 0;
+  in.position.y = 0;
+  in.position.z = 0;
+  in.orientation.w = 1;
+  in.orientation.x = 0;
+  in.orientation.y = 0;
+  in.orientation.z = 0;
+  expected = binPose(in, bins_per_meter, bins_per_rotation);
+  if (bins_per_rotation > 1)
+  {
+    in.orientation.w = .999999;
+    in.orientation.x = 0;
+    in.orientation.y = 0;
+    in.orientation.z = -std::sqrt(1-.999999*.999999);
+    out = binPose(in, bins_per_meter, bins_per_rotation);
+    EXPECT_POSE_NEAR(out, expected);
+    in.orientation.w *= -1;
+    in.orientation.z *= -1;
+    out = binPose(in, bins_per_meter, bins_per_rotation);
+    EXPECT_POSE_NEAR(out, expected);
+    // Make the angle as big as possible while staying in the bin.
+    double u0 = 0 + (0.5 / bins_per_rotation) - std::numeric_limits<double>::epsilon();
+    double u1 = 0 + (0.5 / bins_per_rotation) - std::numeric_limits<double>::epsilon();
+    double u2 = 0.25 + (0.5 / bins_per_rotation) - std::numeric_limits<double>::epsilon();
+    in.orientation.x = std::sqrt(u0) * std::cos(2 * M_PI * u1);
+    in.orientation.y = std::sqrt(u0) * std::sin(2 * M_PI * u1);
+    in.orientation.z = std::sqrt(1.0 - u0) * std::cos(2 * M_PI * u2);
+    in.orientation.w = std::sqrt(1.0 - u0) * std::sin(2 * M_PI * u2);
+    out = binPose(in, bins_per_meter, bins_per_rotation);
+    EXPECT_POSE_NEAR(out, expected);
+    // Go just too far.
+    u2 = 0.25 + (0.5 / bins_per_rotation) + std::numeric_limits<double>::epsilon();
+    in.orientation.z = std::sqrt(1.0 - u0) * std::cos(2 * M_PI * u2);
+    in.orientation.w = std::sqrt(1.0 - u0) * std::sin(2 * M_PI * u2);
+    out = binPose(in, bins_per_meter, bins_per_rotation);
+    EXPECT_POSE_NOT_NEAR(out, expected);
+  }
+  in.position.x = 0;
+  in.position.y = 0;
+  in.position.z = 0;
+  in.orientation.w = 0;
+  in.orientation.x = 0;
+  in.orientation.y = 0;
+  in.orientation.z = 1;
+  out = binPose(in, bins_per_meter, bins_per_rotation);
+  in.orientation.z = -1;
+  expected = binPose(in, bins_per_meter, bins_per_rotation);
+  EXPECT_POSE_NEAR(out, expected);
+  in.orientation.w = -0;
+  expected = binPose(in, bins_per_meter, bins_per_rotation);
+  EXPECT_POSE_NEAR(out, expected);
+  in.orientation.x = -0;
+  expected = binPose(in, bins_per_meter, bins_per_rotation);
+  EXPECT_POSE_NEAR(out, expected);
+  in.orientation.x = 0;
+  in.orientation.y = -0;
+  expected = binPose(in, bins_per_meter, bins_per_rotation);
+  EXPECT_POSE_NEAR(out, expected);
+  in.orientation.w = sin(.001);
+  in.orientation.z = cos(.001);
+  expected = binPose(in, bins_per_meter, bins_per_rotation);
+  EXPECT_POSE_NEAR(out, expected);
+  in.orientation.w *= -1.0;
+  in.orientation.z *= -1.0;
+  expected = binPose(in, bins_per_meter, bins_per_rotation);
+  EXPECT_POSE_NEAR(out, expected);
+  in.orientation.z *= -1.0;
+  expected = binPose(in, bins_per_meter, bins_per_rotation);
+  if (bins_per_rotation > 1)
+  {
+    EXPECT_POSE_NOT_NEAR(out, expected);
+  }
+  else
+  {
+    // There is only one bin...
+    EXPECT_POSE_NEAR(out, expected);
+  }
+  in.orientation.w *= -1.0;
+  in.orientation.z *= -1.0;
+  expected = binPose(in, bins_per_meter, bins_per_rotation);
+  if (bins_per_rotation > 1)
+  {
+    EXPECT_POSE_NOT_NEAR(out, expected);
+  }
+  else
+  {
+    // There is only one bin...
+    EXPECT_POSE_NEAR(out, expected);
+  }
+
+  constexpr size_t n = 10000;
+  std::vector<geometry_msgs::Pose> pose_arr, binned_poses;
+  pose_arr.resize(n);
+  binned_poses.resize(n);
+  std::mt19937 gen(1);
+  std::uniform_real_distribution<> distr(-1.0, 1.0);
+
+  double max_angular_distance = 0.0;
+  // Because the below code measures to the center of the bin, use the limit of
+  // double the bins_per_rotation to get the maximum distance from the center
+  // of a bin to one of its corners.
+  const double angular_distance_limit = binPoseAngularDistanceLimit(2 * bins_per_rotation);
+  for (unsigned i=0; i<n; ++i)
+  {
+    pose_arr[i].position.x = distr(gen);
+    pose_arr[i].position.y = distr(gen);
+    pose_arr[i].position.z = distr(gen);
+    Eigen::Quaterniond q = Eigen::Quaterniond::UnitRandom();
+    pose_arr[i].orientation.x = q.x();
+    pose_arr[i].orientation.y = q.y();
+    pose_arr[i].orientation.z = q.z();
+    pose_arr[i].orientation.w = q.w();
+    binned_poses[i] = binPose(pose_arr[i], bins_per_meter, bins_per_rotation);
+    // Verify a binned pose maps back to itself
+    geometry_msgs::Pose check_pose = binPose(binned_poses[i], bins_per_meter, bins_per_rotation);
+    EXPECT_POSE_NEAR(check_pose, binned_poses[i]);
+    Eigen::Quaterniond binned_q(
+        binned_poses[i].orientation.w,
+        binned_poses[i].orientation.x,
+        binned_poses[i].orientation.y,
+        binned_poses[i].orientation.z);
+    // The distance between two quaternions is simply the dot-product.
+    // To get into radians solve the equation:
+    // cos (angular_distance/2) = |q1 dot q2|
+    double abs_prod = std::abs(q.dot(binned_q.normalized()));
+    EXPECT_LE(abs_prod, 1.0);
+    double angular_distance = 2 * acos(abs_prod);
+    max_angular_distance = std::max(angular_distance, max_angular_distance);
+    EXPECT_LE(angular_distance, angular_distance_limit);
+  }
+
+  if (verbose)
+  {
+    std::cout << "bins_per_rotation: " << bins_per_rotation
+      << " max_angular_distance: " << max_angular_distance
+      << " angular_distance_limit: " << angular_distance_limit
+      << " max_angular_distance ratio: " << max_angular_distance / angular_distance_limit
+      << std::endl;
+  }
+
+  std::chrono::high_resolution_clock::time_point start_time;
+  std::chrono::high_resolution_clock::duration bin_pose_time;
+
+  start_time = std::chrono::high_resolution_clock::now();
+  for (unsigned i=0; i<n; ++i)
+  {
+    binned_poses[i] = binPose(pose_arr[i], bins_per_meter, bins_per_rotation);
+  }
+  bin_pose_time = std::chrono::high_resolution_clock::now() - start_time;
+  if (verbose)
+  {
+    std::cout << "Average time to bin random 3D pose: " <<
+        std::chrono::duration_cast<std::chrono::nanoseconds>(bin_pose_time).count() / n <<
+        "ns" << std::endl;
+  }
+
+  for (unsigned i=0; i<n; ++i)
+  {
+    pose_arr[i].position.x = distr(gen);
+    pose_arr[i].position.y = distr(gen);
+    pose_arr[i].position.z = 0.0;
+    double alpha = 2 * M_PI * distr(gen);
+    Eigen::Quaterniond q(cos(alpha / 2), 0, 0, sin(alpha / 2));
+    pose_arr[i].orientation.x = q.x();
+    pose_arr[i].orientation.y = q.y();
+    pose_arr[i].orientation.z = q.z();
+    pose_arr[i].orientation.w = q.w();
+    binned_poses[i] = binPose(pose_arr[i], bins_per_meter, bins_per_rotation);
+    // Verify a binned pose maps back to itself
+    geometry_msgs::Pose check_pose = binPose(binned_poses[i], bins_per_meter, bins_per_rotation);
+    EXPECT_POSE_NEAR(check_pose, binned_poses[i]);
+    Eigen::Quaterniond binned_q(
+        binned_poses[i].orientation.w,
+        binned_poses[i].orientation.x,
+        binned_poses[i].orientation.y,
+        binned_poses[i].orientation.z);
+    // The distance between two quaternions is simply the dot-product.
+    // To get into radians solve the equation:
+    // cos (angular_distance/2) = |q1 dot q2|
+    double abs_prod = std::abs(q.dot(binned_q.normalized()));
+    EXPECT_LE(abs_prod, 1.0);
+    double angular_distance = 2 * acos(abs_prod);
+    max_angular_distance = std::max(angular_distance, max_angular_distance);
+    EXPECT_LE(angular_distance, angular_distance_limit);
+  }
+
+  start_time = std::chrono::high_resolution_clock::now();
+  for (unsigned i=0; i<n; ++i)
+  {
+    binned_poses[i] = binPose(pose_arr[i], bins_per_meter, bins_per_rotation);
+  }
+  bin_pose_time = std::chrono::high_resolution_clock::now() - start_time;
+  if (verbose)
+  {
+    std::cout << "Average time to bin random 2D pose: " <<
+        std::chrono::duration_cast<std::chrono::nanoseconds>(bin_pose_time).count() / n <<
+        "ns" << std::endl;
+  }
+
+  // Verify that rotations about the z axis all bin equally
+  PoseBinMap pose_bin_map;
+  for (double i=.125 / bins_per_rotation; i<1.0; i+=(.25 / bins_per_rotation))
+  {
+    double half_cos = cos(M_PI * i);
+    double half_sin = sin(M_PI * i);
+    in.orientation.x = 0.0;
+    in.orientation.y = 0.0;
+    in.orientation.z = half_sin;
+    in.orientation.w = half_cos;
+    out = binPose(in, bins_per_meter, bins_per_rotation);
+    PoseBinKey pose_bin_key(out);
+    Eigen::Quaterniond q(
+        in.orientation.w,
+        in.orientation.x,
+        in.orientation.y,
+        in.orientation.z);
+    Eigen::Quaterniond binned_q(
+        out.orientation.w,
+        out.orientation.x,
+        out.orientation.y,
+        out.orientation.z);
+    double angular_distance = 2 * acos(std::abs(q.normalized().dot(binned_q.normalized())));
+    auto& pose_bin = pose_bin_map[pose_bin_key];
+    ++pose_bin.first;
+    pose_bin.second = std::max(pose_bin.second, angular_distance);
+  }
+  for (const auto& bin : pose_bin_map)
+  {
+    EXPECT_EQ(bin.second.first, 4);
+    if (bin.second.first != 4)
+    {
+      std::cout << "bin key: " << bin.first.getBinnedPose()
+        << " size: " << bin.second.first
+        << " angular size: " << bin.second.second << std::endl;
+    }
+  }
+}
+
+using BinPoseFunction = std::function<geometry_msgs::Pose(const geometry_msgs::Pose&, int, int)>;
+
+void eval_pose_binning_fairness(BinPoseFunction bin_func, int bins_per_meter, int bins_per_rotation)
+{
+  // Measure bin_func fairness by sampling a higher resolution uniform grid on SO(3)
+  PoseBinMap pose_bin_map;
+  int factor = 8;
+  int nb = factor * bins_per_rotation;
+  std::mt19937 gen(1);
+  std::uniform_real_distribution<> distr(-.499, .499);
+  for (unsigned int u1 = 0; u1 < nb; ++u1)
+  {
+    for (unsigned int u2 = 0; u2 < nb; ++u2)
+    {
+      for (unsigned int u3 = 0; u3 < nb; ++u3)
+      {
+        const double d1 = (static_cast<double>(u1) + 0.5 + distr(gen)) / nb;
+        const double d1_c0 = std::sqrt(1.0 - d1);
+        const double d1_c1 = std::sqrt(d1);
+        const double d2 = (static_cast<double>(u2) + 0.5 + distr(gen)) / nb;
+        const double cosd2 = std::cos(2 * M_PI * d2);
+        const double sind2 = std::sin(2 * M_PI * d2);
+        const double d3 = (static_cast<double>(u3) + 0.5 + distr(gen)) / nb;
+        const double cosd3 = std::cos(2 * M_PI * d3);
+        const double sind3 = std::sin(2 * M_PI * d3);
+        geometry_msgs::Pose pose;
+        pose.position.x = 0;
+        pose.position.y = 0;
+        pose.position.z = 0;
+        Eigen::Quaterniond q(
+            d1_c0 * sind2,
+            d1_c1 * cosd3,
+            d1_c1 * sind3,
+            d1_c0 * cosd2);
+        pose.orientation.w = q.w();
+        pose.orientation.x = q.x();
+        pose.orientation.y = q.y();
+        pose.orientation.z = q.z();
+        pose = bin_func(pose, bins_per_meter, bins_per_rotation);
+        Eigen::Quaterniond binned_q(
+            pose.orientation.w,
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z);
+        PoseBinKey pose_bin_key(pose);
+        double angular_distance = 2 * acos(std::abs(q.normalized().dot(binned_q.normalized())));
+        auto& pose_bin = pose_bin_map[pose_bin_key];
+        ++pose_bin.first;
+        pose_bin.second = std::max(pose_bin.second, angular_distance);
+      }
+    }
+  }
+  size_t total_bins = 0, min_bins = std::numeric_limits<size_t>::max(), max_bins = 0;
+  double total_angle = 0, min_angle = std::numeric_limits<double>::max(), max_angle = 0;
+  for (const auto& bin : pose_bin_map)
+  {
+    size_t bin_count = bin.second.first;
+    double angular_size = bin.second.second;
+    total_bins += bin_count;
+    total_angle += angular_size;
+    min_bins = std::min(min_bins, bin_count);
+    max_bins = std::max(max_bins, bin_count);
+    min_angle = std::min(min_angle, angular_size);
+    max_angle = std::max(max_angle, angular_size);
+  }
+  double mean_bins = static_cast<double>(total_bins) / pose_bin_map.size();
+  double mean_angle = total_angle / pose_bin_map.size();
+  double bins_sum_of_sq_diffs = 0;
+  double angle_sum_of_sq_diffs = 0;
+  for (const auto& bin : pose_bin_map)
+  {
+    size_t bin_count = bin.second.first;
+    double angular_size = bin.second.second;
+    double diff = bin_count - mean_bins;
+    bins_sum_of_sq_diffs += diff * diff;
+    diff = angular_size - mean_angle;
+    angle_sum_of_sq_diffs += diff * diff;
+    if (max_bins != min_bins && (bin_count == max_bins || bin_count == min_bins))
+    {
+      std::cout << "bin key: " << bin.first.getBinnedPose()
+        << " size: " << bin.second.first
+        << " angular size: " << bin.second.second << std::endl;
+    }
+  }
+  double stdev_bins = std::sqrt(bins_sum_of_sq_diffs / (pose_bin_map.size() - 1));
+  double stdev_angle = std::sqrt(angle_sum_of_sq_diffs / (pose_bin_map.size() - 1));
+  EXPECT_EQ(stdev_bins, 0.0);
+  if (stdev_bins != 0.0)
+  {
+    std::cout << "number of bins: " << pose_bin_map.size() << std::endl;
+    std::cout << "mean size of bin: " << mean_bins << std::endl;
+    std::cout << "min size of bin: " << min_bins << std::endl;
+    std::cout << "max size of bin: " << max_bins << std::endl;
+    std::cout << "stdev: " << stdev_bins << std::endl;
+    std::cout << "mean max-angle of bin: " << mean_angle << std::endl;
+    std::cout << "min max-angle of bin: " << min_angle << std::endl;
+    std::cout << "max max-angle of bin: " << max_angle << std::endl;
+    std::cout << "stdev: " << stdev_angle << std::endl;
+  }
+}
+
+TEST(test_octree_solver, test_pose_binning)
+{
+  constexpr int bins_per_rotation_to_test[] = {1, 2, 4, 6, 8, 10, 16, 20, 32, 50, 100, 128, 256, 500, 512, 1000, 1024};
+
+  for (int bins_per_rotation : bins_per_rotation_to_test)
+  {
+    test_pose_binning_impl(16, bins_per_rotation);
+  }
+  test_pose_binning_impl(16, 2000, true);
+
+  // Testing fairness is expensive, only do it for a few bins per rotation
+  // values.
+  eval_pose_binning_fairness(binPose, 8, 8);
+  eval_pose_binning_fairness(binPose, 16, 16);
+  eval_pose_binning_fairness(binPose, 20, 20);
 }
 
 int main(int argc, char* argv[])

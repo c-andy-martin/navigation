@@ -63,19 +63,19 @@ Costmap3DQuery::Costmap3DQuery(
     double padding,
     Costmap3DQuery::QueryRegionScale query_region_scale,
     unsigned int pose_bins_per_meter,
-    unsigned int pose_bins_per_radian,
+    unsigned int pose_bins_per_rotation,
     unsigned int pose_milli_bins_per_meter,
-    unsigned int pose_milli_bins_per_radian,
+    unsigned int pose_milli_bins_per_rotation,
     unsigned int pose_micro_bins_per_meter,
-    unsigned int pose_micro_bins_per_radian)
+    unsigned int pose_micro_bins_per_rotation)
   : layered_costmap_3d_(layered_costmap_3d),
     query_region_scale_(query_region_scale),
     pose_bins_per_meter_(pose_bins_per_meter),
-    pose_bins_per_radian_(pose_bins_per_radian),
+    pose_bins_per_rotation_(pose_bins_per_rotation),
     pose_milli_bins_per_meter_(pose_milli_bins_per_meter),
-    pose_milli_bins_per_radian_(pose_milli_bins_per_radian),
+    pose_milli_bins_per_rotation_(pose_milli_bins_per_rotation),
     pose_micro_bins_per_meter_(pose_micro_bins_per_meter),
-    pose_micro_bins_per_radian_(pose_micro_bins_per_radian)
+    pose_micro_bins_per_rotation_(pose_micro_bins_per_rotation)
 {
   init();
   updateMeshResource(mesh_resource, padding);
@@ -86,19 +86,19 @@ Costmap3DQuery::Costmap3DQuery(const Costmap3DConstPtr& costmap_3d,
     double padding,
     Costmap3DQuery::QueryRegionScale query_region_scale,
     unsigned int pose_bins_per_meter,
-    unsigned int pose_bins_per_radian,
+    unsigned int pose_bins_per_rotation,
     unsigned int pose_milli_bins_per_meter,
-    unsigned int pose_milli_bins_per_radian,
+    unsigned int pose_milli_bins_per_rotation,
     unsigned int pose_micro_bins_per_meter,
-    unsigned int pose_micro_bins_per_radian)
+    unsigned int pose_micro_bins_per_rotation)
   : layered_costmap_3d_(nullptr),
     query_region_scale_(query_region_scale),
     pose_bins_per_meter_(pose_bins_per_meter),
-    pose_bins_per_radian_(pose_bins_per_radian),
+    pose_bins_per_rotation_(pose_bins_per_rotation),
     pose_milli_bins_per_meter_(pose_milli_bins_per_meter),
-    pose_milli_bins_per_radian_(pose_milli_bins_per_radian),
+    pose_milli_bins_per_rotation_(pose_milli_bins_per_rotation),
     pose_micro_bins_per_meter_(pose_micro_bins_per_meter),
-    pose_micro_bins_per_radian_(pose_micro_bins_per_radian)
+    pose_micro_bins_per_rotation_(pose_micro_bins_per_rotation)
 {
   init();
   // Make a local copy of the costmap in question
@@ -127,19 +127,19 @@ void Costmap3DQuery::init()
 
 void Costmap3DQuery::setCacheBinSize(
       unsigned int pose_bins_per_meter,
-      unsigned int pose_bins_per_radian,
+      unsigned int pose_bins_per_rotation,
       unsigned int pose_milli_bins_per_meter,
-      unsigned int pose_milli_bins_per_radian,
+      unsigned int pose_milli_bins_per_rotation,
       unsigned int pose_micro_bins_per_meter,
-      unsigned int pose_micro_bins_per_radian)
+      unsigned int pose_micro_bins_per_rotation)
 {
   unique_lock instance_lock(instance_mutex_);
   if (pose_bins_per_meter != pose_bins_per_meter_ ||
-      pose_bins_per_radian != pose_bins_per_radian_ ||
+      pose_bins_per_rotation != pose_bins_per_rotation_ ||
       pose_milli_bins_per_meter != pose_milli_bins_per_meter_ ||
-      pose_milli_bins_per_radian != pose_milli_bins_per_radian_ ||
+      pose_milli_bins_per_rotation != pose_milli_bins_per_rotation_ ||
       pose_micro_bins_per_meter != pose_micro_bins_per_meter_ ||
-      pose_micro_bins_per_radian != pose_micro_bins_per_radian_)
+      pose_micro_bins_per_rotation != pose_micro_bins_per_rotation_)
   {
     // There is no need to invalidate the existing cache entries. If the bins
     // per meter change, either some or all of the new calls will miss the
@@ -147,17 +147,17 @@ void Costmap3DQuery::setCacheBinSize(
     // keeping them is fine. Also, if only the thresholds change all the cache
     // entries will still work.
     pose_bins_per_meter_ = pose_bins_per_meter;
-    pose_bins_per_radian_ = pose_bins_per_radian;
+    pose_bins_per_rotation_ = pose_bins_per_rotation;
     pose_milli_bins_per_meter_ = pose_milli_bins_per_meter;
-    pose_milli_bins_per_radian_ = pose_milli_bins_per_radian;
+    pose_milli_bins_per_rotation_ = pose_milli_bins_per_rotation;
     pose_micro_bins_per_meter_ = pose_micro_bins_per_meter;
-    pose_micro_bins_per_radian_ = pose_micro_bins_per_radian;
+    pose_micro_bins_per_rotation_ = pose_micro_bins_per_rotation;
     ROS_INFO_STREAM("Set cache bins per meter: " << pose_bins_per_meter_);
-    ROS_INFO_STREAM("Set cache bins per radian: " << pose_bins_per_radian_);
+    ROS_INFO_STREAM("Set cache bins per rotation: " << pose_bins_per_rotation_);
     ROS_INFO_STREAM("Set milli-cache bins per meter: " << pose_milli_bins_per_meter_);
-    ROS_INFO_STREAM("Set milli-cache bins per radian: " << pose_milli_bins_per_radian_);
+    ROS_INFO_STREAM("Set milli-cache bins per rotation: " << pose_milli_bins_per_rotation_);
     ROS_INFO_STREAM("Set micro-cache bins per meter: " << pose_micro_bins_per_meter_);
-    ROS_INFO_STREAM("Set micro-cache bins per radian: " << pose_micro_bins_per_radian_);
+    ROS_INFO_STREAM("Set micro-cache bins per rotation: " << pose_micro_bins_per_rotation_);
     calculateCacheDistanceThresholds();
   }
 }
@@ -178,6 +178,26 @@ void Costmap3DQuery::setCacheThresholdParameters(
   }
 }
 
+inline double calculateCacheDistanceThreshold(
+    int bins_per_meter,
+    int bins_per_rotation,
+    double mesh_radius,
+    double threshold_factor,
+    bool two_d_mode)
+{
+  double diagonal_factor = two_d_mode ?  std::sqrt(2.0) : std::sqrt(3.0);
+  // Because binPoseAngularDistanceLimit measures the maximum rotational size
+  // of a bin, it may return up to 2 * M_PI, but the maximum chord length is
+  // at an angle of M_PI, so do not use an angular error higher than M_PI.
+  double max_angular_error = std::min(M_PI, binPoseAngularDistanceLimit(
+      bins_per_rotation, two_d_mode));
+  // Add the diagonal length of positional error plus the chord length of the
+  // maximum angular error.
+  double threshold = diagonal_factor / bins_per_meter +
+    2.0 * mesh_radius * std::sin(0.5 * max_angular_error);
+  return threshold * threshold_factor;
+}
+
 void Costmap3DQuery::calculateCacheDistanceThresholds()
 {
   // The distance thresholds must be greater than the maximum translation error
@@ -191,7 +211,6 @@ void Costmap3DQuery::calculateCacheDistanceThresholds()
   // a square and the chord length given the radius of the robot mesh projected
   // into the plane (the robot footprint radius).
   Eigen::Vector4f origin(0.0, 0.0, 0.0, 0.0), max_pt(0.0, 0.0, 0.0, 0.0);
-  double diagonal_factor;
   if (threshold_two_d_mode_)
   {
     // Create a 2D version of the mesh cloud by truncating the Z value.
@@ -201,21 +220,22 @@ void Costmap3DQuery::calculateCacheDistanceThresholds()
       point.z = 0.0;
     }
     pcl::getMaxDistance(mesh_points_2d, origin, max_pt);
-    diagonal_factor = std::sqrt(2.0);
   }
   else
   {
     pcl::getMaxDistance(*robot_mesh_points_, origin, max_pt);
-    diagonal_factor = std::sqrt(3.0);
   }
   const Eigen::Vector3f max_pt3 = max_pt.head<3>();
   double mesh_radius = max_pt3.norm();
   ROS_INFO_STREAM("Calculated mesh radius: " << mesh_radius << "m");
   if (pose_milli_bins_per_meter_ > 0)
   {
-    milli_cache_threshold_ = diagonal_factor / pose_milli_bins_per_meter_ +
-      2.0 * mesh_radius * std::sin(0.5 / pose_milli_bins_per_radian_);
-    milli_cache_threshold_ *= threshold_factor_;
+    milli_cache_threshold_ = calculateCacheDistanceThreshold(
+        pose_milli_bins_per_meter_,
+        pose_milli_bins_per_rotation_,
+        mesh_radius,
+        threshold_factor_,
+        threshold_two_d_mode_);
     ROS_INFO_STREAM("Calculated milli-distance cache threshold: " << milli_cache_threshold_ << "m");
   }
   else
@@ -224,9 +244,12 @@ void Costmap3DQuery::calculateCacheDistanceThresholds()
   }
   if (pose_micro_bins_per_meter_ > 0)
   {
-    micro_cache_threshold_ = diagonal_factor / pose_micro_bins_per_meter_ +
-      2.0 * mesh_radius * std::sin(0.5 / pose_micro_bins_per_radian_);
-    micro_cache_threshold_ *= threshold_factor_;
+    micro_cache_threshold_ = calculateCacheDistanceThreshold(
+        pose_micro_bins_per_meter_,
+        pose_micro_bins_per_rotation_,
+        mesh_radius,
+        threshold_factor_,
+        threshold_two_d_mode_);
     ROS_INFO_STREAM("Calculated micro-distance cache threshold: " << micro_cache_threshold_ << "m");
   }
   else
@@ -887,10 +910,10 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   // Store the region on the stack to avoid dynamic memory allocation.
   RegionsOfInterestAtPose rois(query_region, query_region_scale_, pose);
 
-  DistanceCacheKey milli_cache_key(pose, query_region, query_obstacles, pose_milli_bins_per_meter_, pose_milli_bins_per_radian_);
+  DistanceCacheKey milli_cache_key(pose, query_region, query_obstacles, pose_milli_bins_per_meter_, pose_milli_bins_per_rotation_);
   bool milli_hit = false;
   DistanceCacheEntry cache_entry;
-  if (pose_milli_bins_per_meter_ > 0 && pose_milli_bins_per_radian_ > 0)
+  if (pose_milli_bins_per_meter_ > 0 && pose_milli_bins_per_rotation_ > 0)
   {
     shared_lock cache_read_lock(milli_distance_cache_mutex_);
     auto milli_cache_entry = milli_distance_cache_.find(milli_cache_key);
@@ -934,10 +957,10 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     }
   }
 
-  DistanceCacheKey micro_cache_key(pose, query_region, query_obstacles, pose_micro_bins_per_meter_, pose_micro_bins_per_radian_);
+  DistanceCacheKey micro_cache_key(pose, query_region, query_obstacles, pose_micro_bins_per_meter_, pose_micro_bins_per_rotation_);
   bool micro_hit = false;
   cache_entry.clear();
-  if (pose_micro_bins_per_meter_ > 0 && pose_micro_bins_per_radian_ > 0)
+  if (pose_micro_bins_per_meter_ > 0 && pose_micro_bins_per_rotation_ > 0)
   {
     shared_lock cache_read_lock(micro_distance_cache_mutex_);
     auto micro_cache_entry = micro_distance_cache_.find(micro_cache_key);
@@ -980,7 +1003,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     }
   }
 
-  DistanceCacheKey cache_key(pose, query_region, query_obstacles, pose_bins_per_meter_, pose_bins_per_radian_);
+  DistanceCacheKey cache_key(pose, query_region, query_obstacles, pose_bins_per_meter_, pose_bins_per_rotation_);
   bool cache_hit = false;
   // Assume a milli hit or micro hit is much better than the normal distance
   // cache at setting an upper bound, skip the normal cache lookup in such
@@ -989,7 +1012,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   {
     bool count_as_hit = false;
     cache_entry.clear();
-    if (pose_bins_per_meter_ > 0 && pose_bins_per_radian_ > 0)
+    if (pose_bins_per_meter_ > 0 && pose_bins_per_rotation_ > 0)
     {
       shared_lock cache_read_lock(distance_cache_mutex_);
       auto distance_cache_entry = distance_cache_.find(cache_key);
@@ -1106,18 +1129,18 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     // Update distance caches.
     // While it may seem expensive to copy the cache entries into the
     // caches, it prevents cache aliasing and avoids dynamic memory.
-    if (pose_bins_per_meter_ > 0 && pose_bins_per_radian_ > 0)
+    if (pose_bins_per_meter_ > 0 && pose_bins_per_rotation_ > 0)
     {
       unique_lock cache_write_lock(distance_cache_mutex_);
       distance_cache_[cache_key] = new_entry;
       last_distance_cache_entries_[query_region][query_obstacles] = new_entry;
     }
-    if (pose_milli_bins_per_meter_ > 0 && pose_milli_bins_per_radian_ > 0)
+    if (pose_milli_bins_per_meter_ > 0 && pose_milli_bins_per_rotation_ > 0)
     {
       unique_lock cache_write_lock(milli_distance_cache_mutex_);
       milli_distance_cache_[milli_cache_key] = new_entry;
     }
-    if (pose_micro_bins_per_meter_ > 0 && pose_micro_bins_per_radian_ > 0)
+    if (pose_micro_bins_per_meter_ > 0 && pose_micro_bins_per_rotation_ > 0)
     {
       unique_lock cache_write_lock(micro_distance_cache_mutex_);
       micro_distance_cache_[micro_cache_key] = new_entry;

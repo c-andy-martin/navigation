@@ -57,6 +57,7 @@
 #include <costmap_3d/layered_costmap_3d.h>
 #include <costmap_3d/crop_hull.h>
 #include <costmap_3d_msgs/GetPlanCost3DService.h>
+#include <costmap_3d/bin_pose.h>
 #include <costmap_3d/fcl_helper.h>
 #include <costmap_3d/interior_collision_lut.h>
 #include <costmap_3d/octree_solver.h>
@@ -81,11 +82,11 @@ public:
       double padding = 0.0,
       Costmap3DQuery::QueryRegionScale = Costmap3DQuery::QueryRegionScale::Zero(),
       unsigned int pose_bins_per_meter = 4,
-      unsigned int pose_bins_per_radian = 4,
+      unsigned int pose_bins_per_rotation = 16,
       unsigned int pose_milli_bins_per_meter = 20,
-      unsigned int pose_milli_bins_per_radian = 20,
+      unsigned int pose_milli_bins_per_rotation = 80,
       unsigned int pose_micro_bins_per_meter = 1024,
-      unsigned int pose_micro_bins_per_radian = 1024);
+      unsigned int pose_micro_bins_per_rotation = 4096);
 
   /**
    * @brief  Construct a query object on a particular costmap 3D.
@@ -102,11 +103,11 @@ public:
       double padding = 0.0,
       Costmap3DQuery::QueryRegionScale = Costmap3DQuery::QueryRegionScale::Zero(),
       unsigned int pose_bins_per_meter = 4,
-      unsigned int pose_bins_per_radian = 4,
+      unsigned int pose_bins_per_rotation = 32,
       unsigned int pose_milli_bins_per_meter = 20,
-      unsigned int pose_milli_bins_per_radian = 20,
+      unsigned int pose_milli_bins_per_rotation = 160,
       unsigned int pose_micro_bins_per_meter = 1024,
-      unsigned int pose_micro_bins_per_radian = 1024);
+      unsigned int pose_micro_bins_per_rotation = 8192);
 
   virtual ~Costmap3DQuery();
 
@@ -278,11 +279,11 @@ public:
    */
   void setCacheBinSize(
       unsigned int pose_bins_per_meter = 4,
-      unsigned int pose_bins_per_radian = 4,
+      unsigned int pose_bins_per_rotation = 32,
       unsigned int pose_milli_bins_per_meter = 20,
-      unsigned int pose_milli_bins_per_radian = 20,
+      unsigned int pose_milli_bins_per_rotation = 160,
       unsigned int pose_micro_bins_per_meter = 1024,
-      unsigned int pose_micro_bins_per_radian = 1024);
+      unsigned int pose_micro_bins_per_rotation = 8192);
 
   /** @brief Calculate the distance cache thresholds.
    *
@@ -466,15 +467,15 @@ private:
   class DistanceCacheKey
   {
   public:
-    DistanceCacheKey(const geometry_msgs::Pose& pose, QueryRegion query_region, bool query_obstacles, int bins_per_meter, int bins_per_radian)
+    DistanceCacheKey(const geometry_msgs::Pose& pose, QueryRegion query_region, bool query_obstacles, int bins_per_meter, int bins_per_rotation)
     {
-      // If bins_per_meter or bins_per_radian are zero, the cache is disabled.
+      // If bins_per_meter or bins_per_rotation are zero, the cache is disabled.
       // The key is allowed to be calculated anyway as an exact key (and this
       // may simplify the caller in cases where it wants to setup a cache key
       // even if the caches are disabled, then check later).
-      if (bins_per_meter > 0 && bins_per_radian > 0)
+      if (bins_per_meter > 0 && bins_per_rotation > 0)
       {
-        binned_pose_ = binPose(pose, bins_per_meter, bins_per_radian);
+        binned_pose_ = binPose(pose, bins_per_meter, bins_per_rotation);
       }
       else
       {
@@ -550,56 +551,6 @@ private:
         rv += u[i].uint * primes[i];
       }
       return static_cast<size_t>(rv);
-    }
-    // Bin a pose.
-    inline geometry_msgs::Pose binPose(const geometry_msgs::Pose& pose,
-                                       int bins_per_meter,
-                                       int bins_per_radian)
-    {
-      geometry_msgs::Pose rv;
-      rv.position.x = static_cast<double>(static_cast<int64_t>(pose.position.x * bins_per_meter)) / bins_per_meter;
-      rv.position.y = static_cast<double>(static_cast<int64_t>(pose.position.y * bins_per_meter)) / bins_per_meter;
-      rv.position.z = static_cast<double>(static_cast<int64_t>(pose.position.z * bins_per_meter)) / bins_per_meter;
-
-      // Speed up the orientation binning by rounding the Cayley transform of
-      // the quaternion versor instead of binning by Euler angles. It is more
-      // expensive to get the Euler angles as it requires several atan2
-      // operations. Getting the Cayley transform (and its inverse) requires
-      // negating the versor if the scalar is negative, then a few simple
-      // division/multiplication operations. The rounding error is fairly
-      // uniform across SO(3). For more information, see:
-      //
-      // https://marc-b-reynolds.github.io/quaternions/2017/05/02/QuatQuantPart1.html
-      //
-      // The old technique exactly matches what the above calls 'ZYX', and what
-      // is implemented below is the 'Basic Cayley'. If we ever find that the
-      // Cayley transform is introducing too much angular error, another
-      // reasonable compromise between runtime and accuracy is what the above
-      // calls the 'Basic Harmonic Mean' method.
-      double w = pose.orientation.w;
-      Eigen::Vector3f v(
-          pose.orientation.x,
-          pose.orientation.y,
-          pose.orientation.z);
-      if (w < 0.0)
-      {
-        w = -w;
-        v[0] = -v[0];
-        v[1] = -v[1];
-        v[2] = -v[2];
-      }
-      double s = 1.0 / (1.0 + w);
-      v *= s;
-      v[0] = static_cast<double>(static_cast<int64_t>(v[0] * bins_per_radian)) / bins_per_radian;
-      v[1] = static_cast<double>(static_cast<int64_t>(v[1] * bins_per_radian)) / bins_per_radian;
-      v[2] = static_cast<double>(static_cast<int64_t>(v[2] * bins_per_radian)) / bins_per_radian;
-      double s_inv = 2.0 / (1.0 + v.dot(v));
-      v *= s_inv;
-      rv.orientation.w = s_inv - 1.0;
-      rv.orientation.x = v[0];
-      rv.orientation.y = v[1];
-      rv.orientation.z = v[2];
-      return rv;
     }
   };
 
@@ -851,16 +802,16 @@ private:
   unsigned int last_layered_costmap_update_number_;
   //! Distance cache bins per meter for binning the pose's position
   unsigned int pose_bins_per_meter_;
-  //! Distance cache bins per radian for binning the pose's orientation
-  unsigned int pose_bins_per_radian_;
+  //! Distance cache bins per rotation for binning the pose's orientation
+  unsigned int pose_bins_per_rotation_;
   //! Milli-distance cache bins per meter for binning the pose's position
   unsigned int pose_milli_bins_per_meter_;
-  //! Milli-distance cache bins per radian for binning the pose's position
-  unsigned int pose_milli_bins_per_radian_;
+  //! Milli-distance cache bins per rotation for binning the pose's orientation
+  unsigned int pose_milli_bins_per_rotation_;
   //! Micro-distance cache bins per meter for binning the pose's position
   unsigned int pose_micro_bins_per_meter_;
-  //! Micro-distance cache bins per radian for binning the pose's position
-  unsigned int pose_micro_bins_per_radian_;
+  //! Micro-distance cache bins per rotation for binning the pose's orientation
+  unsigned int pose_micro_bins_per_rotation_;
   // Statistics gathered between clearing cycles
   void printStatistics();
   void clearStatistics();

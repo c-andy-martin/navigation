@@ -318,11 +318,11 @@ private:
       double padding,
       Costmap3DQuery::QueryRegionScale query_region_scale = Costmap3DQuery::QueryRegionScale::Zero(),
       unsigned int pose_bins_per_meter = 4,
-      unsigned int pose_bins_per_radian = 4,
+      unsigned int pose_bins_per_rotation = 32,
       unsigned int pose_milli_bins_per_meter = 20,
-      unsigned int pose_milli_bins_per_radian = 20,
+      unsigned int pose_milli_bins_per_rotation = 160,
       unsigned int pose_micro_bins_per_meter = 1024,
-      unsigned int pose_micro_bins_per_radian = 1024);
+      unsigned int pose_micro_bins_per_rotation = 8192);
   void publishFootprint();
   void publishRegionOfInterest(std::shared_ptr<Costmap3DQuery> query, const geometry_msgs::PoseStamped& query_pose);
 
