@@ -597,47 +597,18 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   const QueryRegion query_region = opts.query_region;
   const QueryObstacles query_obstacles = opts.query_obstacles;
 
-  upgrade_lock upgrade_lock(upgrade_mutex_);
   std::chrono::high_resolution_clock::time_point start_time = std::chrono::high_resolution_clock::now();
   queries_since_clear_.fetch_add(1, std::memory_order_relaxed);
-  if (!robot_model_)
-  {
-    // We failed to create a robot model.
-    // The failure would have been logged, so simply return collision.
-    return -1.0;
-  }
-  checkCostmap(upgrade_lock);
-  std::shared_ptr<const octomap::OcTree> octree_to_query;
-  if (query_obstacles == NONLETHAL_ONLY)
-  {
-    if (!nonlethal_octree_ptr_)
-    {
-      // We do not yet have a nonlethal copy of the tree, create one now and save it until
-      // the next costmap update. In order to do this safely we must grab the write lock.
-      // This is OK, it will only happen once per update cycle.
-      upgrade_to_unique_lock write_lock(upgrade_lock);
-      nonlethal_octree_ptr_ = std::static_pointer_cast<const Costmap3D>(octree_ptr_)->nonlethalOnly();
-    }
-    octree_to_query = nonlethal_octree_ptr_;
-  }
-  else
-  {
-    octree_to_query = octree_ptr_;
-  }
-  assert(octree_to_query);
-
-  // FCL does not correctly handle an empty octomap.
-  if (octree_to_query->size() == 0)
-  {
-    empties_since_clear_.fetch_add(1, std::memory_order_relaxed);
-    return std::numeric_limits<double>::max();
-  }
 
   // Use the passed in distance limit up to the "min" float (close to zero)
   // We do not want to use a zero or negative distance limit from the options
   // because that will prevent us from correctly searching the octomap/mesh
   FCLFloat pose_distance = std::max(opts.distance_limit, std::numeric_limits<FCLFloat>::min());
 
+  // Handle reuse results first before acquiring any locks.
+  // It is already up to the caller using reuse results to ensure the costmap
+  // hasn't updated in-between calls, so it is pointless to acquire the lock to
+  // check.
   if (opts.reuse_past_result)
   {
     // Reuse the past result (if there was one) and directly return the new distance.
@@ -669,6 +640,40 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
       // nothing found.
       return pose_distance;
     }
+  }
+
+  upgrade_lock upgrade_lock(upgrade_mutex_);
+  if (!robot_model_)
+  {
+    // We failed to create a robot model.
+    // The failure would have been logged, so simply return collision.
+    return -1.0;
+  }
+  checkCostmap(upgrade_lock);
+  std::shared_ptr<const octomap::OcTree> octree_to_query;
+  if (query_obstacles == NONLETHAL_ONLY)
+  {
+    if (!nonlethal_octree_ptr_)
+    {
+      // We do not yet have a nonlethal copy of the tree, create one now and save it until
+      // the next costmap update. In order to do this safely we must grab the write lock.
+      // This is OK, it will only happen once per update cycle.
+      upgrade_to_unique_lock write_lock(upgrade_lock);
+      nonlethal_octree_ptr_ = std::static_pointer_cast<const Costmap3D>(octree_ptr_)->nonlethalOnly();
+    }
+    octree_to_query = nonlethal_octree_ptr_;
+  }
+  else
+  {
+    octree_to_query = octree_ptr_;
+  }
+  assert(octree_to_query);
+
+  // FCL does not correctly handle an empty octomap.
+  if (octree_to_query->size() == 0)
+  {
+    empties_since_clear_.fetch_add(1, std::memory_order_relaxed);
+    return std::numeric_limits<double>::max();
   }
 
   DistanceCacheKey exact_cache_key(pose, query_region, query_obstacles);
