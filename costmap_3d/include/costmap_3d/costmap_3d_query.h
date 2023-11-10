@@ -280,6 +280,7 @@ protected:
   const LayeredCostmap3D* layered_costmap_3d_;
 
   using upgrade_mutex = boost::upgrade_mutex;
+  using shared_lock = boost::shared_lock<upgrade_mutex>;
   using upgrade_lock = boost::upgrade_lock<upgrade_mutex>;
   using upgrade_to_unique_lock = boost::upgrade_to_unique_lock<upgrade_mutex>;
   using unique_lock = boost::unique_lock<upgrade_mutex>;
@@ -294,6 +295,15 @@ protected:
    */
   virtual void checkCostmap(upgrade_lock& upgrade_lock,
                             std::shared_ptr<const octomap::OcTree> new_octree = nullptr);
+
+  /** @brief See if checkCostmap may be needed.
+   * Note: must be called holding at least a shared lock on the upgrade_mutex_
+   * Returns true if checkCostmap should be called. The whole point of this
+   * method is to keep from having to obtain an upgrade lock unless the costmap
+   * may actually have changed, which can be determined while holding a shared
+   * lock.
+   */
+  virtual bool needCheckCostmap(std::shared_ptr<const octomap::OcTree> new_octree = nullptr);
 
   /** @brief Update the mesh to use for queries. */
   virtual void updateMeshResource(const std::string& mesh_resource, double padding = 0.0);
