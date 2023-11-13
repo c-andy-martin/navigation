@@ -1038,6 +1038,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     octree_solver.setExactSignedDistance(true);
   }
 
+  bool update_shared_caches = true;
   if (result.min_distance > 0.0 || opts.exact_signed_distance)
   {
     fcl::OcTree<FCLFloat> fcl_octree(octree_to_query);
@@ -1054,6 +1055,15 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
         request,
         &result);
   }
+  else
+  {
+    // If there was a cached collision, skip updating the shared caches (do
+    // update the TLS cache). It is expensive to get the write lock. Because
+    // there was already a cached collision, any future queries that would hit
+    // this entry should also hit the collision as well, so the cost of
+    // updating outweighs any benefit.
+    update_shared_caches = false;
+  }
   distance = result.min_distance;
 
   // Note that it is possible for the result to be empty. The octomap might
@@ -1067,6 +1077,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     new_entry.distance = distance;
 
     // Update distance caches.
+    if (update_shared_caches)
     {
       // Get write access
       unique_lock write_lock(upgrade_mutex_);
