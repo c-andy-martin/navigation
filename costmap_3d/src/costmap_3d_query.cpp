@@ -771,90 +771,108 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     }
   }
 
-  shared_lock read_lock(upgrade_mutex_);
+  std::shared_ptr<const octomap::OcTree> octree_to_query;
+  DistanceCacheKey exact_cache_key(pose, query_region, query_obstacles);
+  {
+    // Read lock section.
+    // We could keep the read-lock held during the relatively long distance query
+    // or distance calculations for two reasons:
+    // 1) the world has a raw pointer to the octomap, so it must not be freed
+    // 2) we do not want to be able to clear the cache during the distance
+    //    query and then add an invalid cache entry below
+    // However, it is not possible in practice for either of these things to
+    // happen, as it is already necessary to either have the associated costmap
+    // locked, or to have a copy (which by definition won't change). It allows
+    // for much more parallelism to keep the read lock dropped during the
+    // distance query. Therefore, hold the read lock as little as possible to
+    // allow writers to be more efficient. Hold the read lock during the
+    // initial state checks (to see if the costmap needs to be updated, etc.)
+    // and during cache searches. If a cache is hit, the cache entry will be
+    // copied to the stack before doing hard work on it and the read lock
+    // dropped.
+    shared_lock read_lock(upgrade_mutex_);
 
-  if (!robot_model_)
-  {
-    // We failed to create a robot model.
-    // The failure would have been logged, so simply return collision.
-    return -1.0;
-  }
+    if (!robot_model_)
+    {
+      // We failed to create a robot model.
+      // The failure would have been logged, so simply return collision.
+      return -1.0;
+    }
 
-  // Check if an upgrade lock will be necessary. Do not do this with an upgrade
-  // lock held, as only one thread can have an upgrade lock at a time.
-  bool need_upgrade_lock = false;
-  if (needCheckCostmap())
-  {
-    need_upgrade_lock = true;
-  }
-  if (query_obstacles == NONLETHAL_ONLY && !nonlethal_octree_ptr_)
-  {
-    need_upgrade_lock = true;
-  }
-
-  if (need_upgrade_lock)
-  {
-    // Drop the shared lock to get an upgrade lock. The only safe way to do
-    // this and avoid deadlock/livelock is to drop the shared lock and then get
-    // an upgrade lock. Because the lock is dropped, we must re-check the
-    // conditions after acquiring the upgrade mutex (as it may no longer be
-    // necessary). Because this very slow path is only encountered at most once
-    // or twice per update cycle (depending on if non-lethal queries are
-    // issued and if this is a buffered query) this is OK.
-    read_lock.unlock();
-    read_lock.release();
-    upgrade_lock upgradeable_lock(upgrade_mutex_);
-    checkCostmap(upgradeable_lock);
+    // Check if an upgrade lock will be necessary. Do not do this with an upgrade
+    // lock held, as only one thread can have an upgrade lock at a time.
+    bool need_upgrade_lock = false;
+    if (needCheckCostmap())
+    {
+      need_upgrade_lock = true;
+    }
     if (query_obstacles == NONLETHAL_ONLY && !nonlethal_octree_ptr_)
     {
-      // We do not yet have a nonlethal copy of the tree, create one now and save it until
-      // the next costmap update. In order to do this safely we must grab the write lock.
-      // This is OK, it will only happen once per update cycle.
-      upgrade_to_unique_lock write_lock(upgradeable_lock);
-      nonlethal_octree_ptr_ = std::static_pointer_cast<const Costmap3D>(octree_ptr_)->nonlethalOnly();
+      need_upgrade_lock = true;
     }
-    // Re-acquire the shared lock. This can be done atomically by downgrading
-    // the upgrade lock to a shared lock.
-    read_lock = shared_lock(std::move(upgradeable_lock));
-  }
 
-  std::shared_ptr<const octomap::OcTree> octree_to_query;
-  if (query_obstacles == NONLETHAL_ONLY)
-  {
-    octree_to_query = nonlethal_octree_ptr_;
-  }
-  else
-  {
-    octree_to_query = octree_ptr_;
-  }
-  assert(octree_to_query);
-
-  // FCL does not correctly handle an empty octomap.
-  if (octree_to_query->size() == 0)
-  {
-    if (track_statistics)
+    if (need_upgrade_lock)
     {
-      empties_since_clear_.fetch_add(1, std::memory_order_relaxed);
+      // Drop the shared lock to get an upgrade lock. The only safe way to do
+      // this and avoid deadlock/livelock is to drop the shared lock and then get
+      // an upgrade lock. Because the lock is dropped, we must re-check the
+      // conditions after acquiring the upgrade mutex (as it may no longer be
+      // necessary). Because this very slow path is only encountered at most once
+      // or twice per update cycle (depending on if non-lethal queries are
+      // issued and if this is a buffered query) this is OK.
+      read_lock.unlock();
+      read_lock.release();
+      upgrade_lock upgradeable_lock(upgrade_mutex_);
+      checkCostmap(upgradeable_lock);
+      if (query_obstacles == NONLETHAL_ONLY && !nonlethal_octree_ptr_)
+      {
+        // We do not yet have a nonlethal copy of the tree, create one now and save it until
+        // the next costmap update. In order to do this safely we must grab the write lock.
+        // This is OK, it will only happen once per update cycle.
+        upgrade_to_unique_lock write_lock(upgradeable_lock);
+        nonlethal_octree_ptr_ = std::static_pointer_cast<const Costmap3D>(octree_ptr_)->nonlethalOnly();
+      }
+      // Re-acquire the shared lock. This can be done atomically by downgrading
+      // the upgrade lock to a shared lock.
+      read_lock = shared_lock(std::move(upgradeable_lock));
     }
-    return std::numeric_limits<double>::max();
-  }
 
-  DistanceCacheKey exact_cache_key(pose, query_region, query_obstacles);
-  auto exact_cache_entry = exact_distance_cache_.find(exact_cache_key);
-  if (exact_cache_entry != exact_distance_cache_.end())
-  {
-    double distance = exact_cache_entry->second.distance;
-    // Be sure to update the TLS last cache entry.
-    // We do not need the write lock to update thread local storage.
-    tls_last_cache_entries_[query_region][query_obstacles] = exact_cache_entry->second;
-    if (track_statistics)
+    if (query_obstacles == NONLETHAL_ONLY)
     {
-      exact_hits_since_clear_.fetch_add(1, std::memory_order_relaxed);
-      exact_hits_since_clear_us_.fetch_add(
-          std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start_time).count(),
-          std::memory_order_relaxed);
+      octree_to_query = nonlethal_octree_ptr_;
     }
-    return distance;
+    else
+    {
+      octree_to_query = octree_ptr_;
+    }
+    assert(octree_to_query);
+
+    // FCL does not correctly handle an empty octomap.
+    if (octree_to_query->size() == 0)
+    {
+      if (track_statistics)
+      {
+        empties_since_clear_.fetch_add(1, std::memory_order_relaxed);
+      }
+      return std::numeric_limits<double>::max();
+    }
+
+    auto exact_cache_entry = exact_distance_cache_.find(exact_cache_key);
+    if (exact_cache_entry != exact_distance_cache_.end())
+    {
+      double distance = exact_cache_entry->second.distance;
+      // Be sure to update the TLS last cache entry.
+      // We do not need the write lock to update thread local storage.
+      tls_last_cache_entries_[query_region][query_obstacles] = exact_cache_entry->second;
+      if (track_statistics)
+      {
+        exact_hits_since_clear_.fetch_add(1, std::memory_order_relaxed);
+        exact_hits_since_clear_us_.fetch_add(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start_time).count(),
+            std::memory_order_relaxed);
+      }
+      return distance;
+    }
   }
 
   fcl::DistanceRequest<FCLFloat> request;
@@ -867,19 +885,27 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   RegionsOfInterestAtPose rois(query_region, query_region_scale_, pose);
 
   DistanceCacheKey milli_cache_key(pose, query_region, query_obstacles, pose_milli_bins_per_meter_, pose_milli_bins_per_radian_);
-  auto milli_cache_entry = milli_distance_cache_.find(milli_cache_key);
   bool milli_hit = false;
-  if (milli_cache_entry != milli_distance_cache_.end() &&
-      rois.distanceCacheEntryInside(milli_cache_entry->second))
+  DistanceCacheEntry cache_entry_copy;
+  {
+    shared_lock read_lock(upgrade_mutex_);
+    auto milli_cache_entry = milli_distance_cache_.find(milli_cache_key);
+    if (milli_cache_entry != milli_distance_cache_.end() &&
+        rois.distanceCacheEntryInside(milli_cache_entry->second))
+    {
+      cache_entry_copy = milli_cache_entry->second;
+    }
+  }
+  if (cache_entry_copy)
   {
     double distance = handleDistanceInteriorCollisions(
-        milli_cache_entry->second,
+        cache_entry_copy,
         pose);
-    if (milli_cache_entry->second.distance > milli_cache_threshold_)
+    if (cache_entry_copy.distance > milli_cache_threshold_)
     {
       // Be sure to update the TLS last cache entry.
       // We do not need the write lock to update thread local storage.
-      tls_last_cache_entries_[query_region][query_obstacles] = milli_cache_entry->second;
+      tls_last_cache_entries_[query_region][query_obstacles] = cache_entry_copy;
       if (track_statistics)
       {
         fast_milli_hits_since_clear_.fetch_add(1, std::memory_order_relaxed);
@@ -897,25 +923,33 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
       {
         milli_hit = true;
         pose_distance = distance;
-        milli_cache_entry->second.setupResult(&result);
+        cache_entry_copy.setupResult(&result);
       }
     }
   }
 
   DistanceCacheKey micro_cache_key(pose, query_region, query_obstacles, pose_micro_bins_per_meter_, pose_micro_bins_per_radian_);
-  auto micro_cache_entry = micro_distance_cache_.find(micro_cache_key);
   bool micro_hit = false;
-  if (micro_cache_entry != micro_distance_cache_.end() &&
-      rois.distanceCacheEntryInside(micro_cache_entry->second))
+  cache_entry_copy.clear();
+  {
+    shared_lock read_lock(upgrade_mutex_);
+    auto micro_cache_entry = micro_distance_cache_.find(micro_cache_key);
+    if (micro_cache_entry != micro_distance_cache_.end() &&
+        rois.distanceCacheEntryInside(micro_cache_entry->second))
+    {
+      cache_entry_copy = micro_cache_entry->second;
+    }
+  }
+  if (cache_entry_copy)
   {
     double distance = handleDistanceInteriorCollisions(
-        micro_cache_entry->second,
+        cache_entry_copy,
         pose);
-    if (micro_cache_entry->second.distance > micro_cache_threshold_)
+    if (cache_entry_copy.distance > micro_cache_threshold_)
     {
       // Be sure to update the TLS last cache entry.
       // We do not need the write lock to update thread local storage.
-      tls_last_cache_entries_[query_region][query_obstacles] = micro_cache_entry->second;
+      tls_last_cache_entries_[query_region][query_obstacles] = cache_entry_copy;
       if (track_statistics)
       {
         fast_micro_hits_since_clear_.fetch_add(1, std::memory_order_relaxed);
@@ -933,7 +967,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
       {
         micro_hit = true;
         pose_distance = distance;
-        micro_cache_entry->second.setupResult(&result);
+        cache_entry_copy.setupResult(&result);
       }
     }
   }
@@ -945,22 +979,30 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   // cases.
   if (!milli_hit && !micro_hit)
   {
-    auto cache_entry = distance_cache_.find(cache_key);
-    if (cache_entry != distance_cache_.end() &&
-        rois.distanceCacheEntryInside(cache_entry->second))
+    cache_entry_copy.clear();
+    {
+      shared_lock read_lock(upgrade_mutex_);
+      auto cache_entry = distance_cache_.find(cache_key);
+      if (cache_entry != distance_cache_.end() &&
+          rois.distanceCacheEntryInside(cache_entry->second))
+      {
+        DistanceCacheEntry cache_entry_copy = cache_entry->second;
+      }
+    }
+    if (cache_entry_copy)
     {
       // Cache hit, find the distance between the mesh triangle at the new pose
       // and the octomap box, and use this as our initial guess in the result.
       // This greatly prunes the search tree, yielding a big increase in runtime
       // performance.
       double distance = handleDistanceInteriorCollisions(
-          cache_entry->second,
+          cache_entry_copy,
           pose);
       if (distance < pose_distance)
       {
         cache_hit = true;
         pose_distance = distance;
-        cache_entry->second.setupResult(&result);
+        cache_entry_copy.setupResult(&result);
       }
     }
   }
@@ -968,6 +1010,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   // Check the distance from the last cache entry too, and use it if it is a
   // better match. This is especialy useful if we miss every cache, but have a
   // last entry, and the queries are being done on a path.
+  // Note: no need to hold the read lock as the entry is stored in TLS.
   if (tls_last_cache_entries_[query_region][query_obstacles] &&
       rois.distanceCacheEntryInside(tls_last_cache_entries_[query_region][query_obstacles]))
   {
@@ -980,21 +1023,6 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
       tls_last_cache_entries_[query_region][query_obstacles].setupResult(&result);
     }
   }
-
-  // We could keep the read-lock held during the relatively long distance query
-  // for two reasons:
-  // 1) the world has a raw pointer to the octomap, so it must not be freed
-  // 2) we do not want to be able to clear the cache during the distance
-  //    query and then add an invalid cache entry below
-  // However, it is not possible in practice for either of these things to
-  // happen, as it is already necessary to either have the associated costmap
-  // locked, or to have a copy (which by definition won't change). It allows
-  // for much more parallelism to keep the read lock dropped during the
-  // distance query.
-  read_lock.unlock();
-  // Release the mutex, when it is needed again below it will be passed back
-  // into a new lock.
-  read_lock.release();
 
   request.rel_err = opts.relative_error;
   request.enable_nearest_points = true;
