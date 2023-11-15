@@ -296,83 +296,92 @@ void Costmap3DQuery::checkCostmap(Costmap3DQuery::upgrade_lock& upgrade_lock,
     }
     checkInteriorCollisionLUT();
     // The costmap has been updated since the last query, reset our caches
-
-    // Delete any distance cache entries that have had their corresponding
-    // octomap cells removed. It is fine to keep entries in the presence of
-    // additions, as the entry only defines an upper bound. Because the size of
-    // the tree is limited, the size of the cache has a natural limit. If this
-    // limit is ever too large, a separate cache size may need to be set.
+    for (unsigned int i=0; i<MAX; ++i)
     {
-      auto it = distance_cache_.begin();
-      while (it != distance_cache_.end())
+      for (unsigned int j=0; j<OBSTACLES_MAX; ++j)
       {
-        bool erase = true;
-        Costmap3DIndex index;
-        unsigned int depth;
-        if (it->second.getCostmapIndexAndDepth(*octree_ptr_, &index, &depth))
+        DistanceCache& distance_cache = distance_cache_[i][j];
+        DistanceCache& milli_distance_cache = milli_distance_cache_[i][j];
+        DistanceCache& micro_distance_cache = micro_distance_cache_[i][j];
+        ExactDistanceCache& exact_distance_cache = exact_distance_cache_[i][j];
+        // Delete any distance cache entries that have had their corresponding
+        // octomap cells removed. It is fine to keep entries in the presence of
+        // additions, as the entry only defines an upper bound. Because the size of
+        // the tree is limited, the size of the cache has a natural limit. If this
+        // limit is ever too large, a separate cache size may need to be set.
         {
-          auto* node = octree_ptr_->search(index, depth);
-          if (node && !octree_ptr_->nodeHasChildren(node))
+          auto it = distance_cache.begin();
+          while (it != distance_cache.end())
           {
-            // The node exists and has no children (so its a leaf and not an inner node)
-            // Keep this entry.
-            erase = false;
+            bool erase = true;
+            Costmap3DIndex index;
+            unsigned int depth;
+            if (it->second.getCostmapIndexAndDepth(*octree_ptr_, &index, &depth))
+            {
+              auto* node = octree_ptr_->search(index, depth);
+              if (node && !octree_ptr_->nodeHasChildren(node))
+              {
+                // The node exists and has no children (so its a leaf and not an inner node)
+                // Keep this entry.
+                erase = false;
+              }
+            }
+
+            if (erase)
+              it = distance_cache.erase(it);
+            else
+              ++it;
           }
         }
 
-        if (erase)
-          it = distance_cache_.erase(it);
-        else
-          ++it;
-      }
-    }
-
-    // Delete any milli distance cache entries that have had their
-    // corresponding octomap cells removed. If the cell has not been removed,
-    // invalidate the milli cache entry from being used in the fast-path, but
-    // let it still be used as an upper-bound for the slow path, as it greatly
-    // reduces subsequent query times. Also note that the caches are always
-    // updated after a successful query, so the staleness of the bound will be
-    // fixed the next query that hits the cache.
-    {
-      auto it = milli_distance_cache_.begin();
-      while (it != milli_distance_cache_.end())
-      {
-        bool erase = true;
-        Costmap3DIndex index;
-        unsigned int depth;
-        if (it->second.getCostmapIndexAndDepth(*octree_ptr_, &index, &depth))
+        // Delete any milli distance cache entries that have had their
+        // corresponding octomap cells removed. If the cell has not been removed,
+        // invalidate the milli cache entry from being used in the fast-path, but
+        // let it still be used as an upper-bound for the slow path, as it greatly
+        // reduces subsequent query times. Also note that the caches are always
+        // updated after a successful query, so the staleness of the bound will be
+        // fixed the next query that hits the cache.
         {
-          auto* node = octree_ptr_->search(index, depth);
-          if (node && !octree_ptr_->nodeHasChildren(node))
+          auto it = milli_distance_cache.begin();
+          while (it != milli_distance_cache.end())
           {
-            // The node exists and has no children (so its a leaf and not an inner node)
-            // Keep this entry.
-            erase = false;
+            bool erase = true;
+            Costmap3DIndex index;
+            unsigned int depth;
+            if (it->second.getCostmapIndexAndDepth(*octree_ptr_, &index, &depth))
+            {
+              auto* node = octree_ptr_->search(index, depth);
+              if (node && !octree_ptr_->nodeHasChildren(node))
+              {
+                // The node exists and has no children (so its a leaf and not an inner node)
+                // Keep this entry.
+                erase = false;
+              }
+            }
+
+            if (erase)
+            {
+              it = milli_distance_cache.erase(it);
+            }
+            else
+            {
+              // The code only uses the fast-path when the recorded distance is
+              // over the milli cache threshold, so set to the threshold.
+              it->second.distance = milli_cache_threshold_;
+              ++it;
+            }
           }
         }
 
-        if (erase)
-        {
-          it = milli_distance_cache_.erase(it);
-        }
-        else
-        {
-          // The code only uses the fast-path when the recorded distance is
-          // over the milli cache threshold, so set to the threshold.
-          it->second.distance = milli_cache_threshold_;
-          ++it;
-        }
+        // Drop the micro cache. It is not worth iterating over the (relatively
+        // large) micro cache.  New entries in the costmap make the upper bound
+        // fairly worthless and we can not use the fast path which is the micro
+        // cache's strong point.
+        micro_distance_cache.clear();
+        // We must drop the exact cache after the costmap has changed
+        exact_distance_cache.clear();
       }
     }
-
-    // Drop the micro cache. It is not worth iterating over the (relatively
-    // large) micro cache.  New entries in the costmap make the upper bound
-    // fairly worthless and we can not use the fast path which is the micro
-    // cache's strong point.
-    micro_distance_cache_.clear();
-    // We must drop the exact cache after the costmap has changed
-    exact_distance_cache_.clear();
     printStatistics();
     clearStatistics();
     if (layered_costmap_3d_)
@@ -380,6 +389,10 @@ void Costmap3DQuery::checkCostmap(Costmap3DQuery::upgrade_lock& upgrade_lock,
       last_layered_costmap_update_number_ = layered_costmap_3d_->getNumberOfUpdates();
     }
   }
+}
+
+void Costmap3DQuery::checkTLS()
+{
   // Check if any thread local state must be invalidated.
   // We must handle if either the costmap has been updated since this thread's
   // storage was invalidated, or if a different instance of the object is
@@ -716,6 +729,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   // Make convenience aliases of some of the options
   const QueryRegion query_region = opts.query_region;
   const QueryObstacles query_obstacles = opts.query_obstacles;
+
   // Let compiler optimize track_statistics by adding it to the stack.
   const bool track_statistics = track_statistics_;
 
@@ -731,6 +745,15 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   // because that will prevent us from correctly searching the octomap/mesh
   FCLFloat pose_distance = std::max(opts.distance_limit, std::numeric_limits<FCLFloat>::min());
 
+  checkTLS();
+
+  // Make convenience aliases of the various caches
+  DistanceCache& distance_cache = distance_cache_[query_region][query_obstacles];
+  DistanceCache& milli_distance_cache = milli_distance_cache_[query_region][query_obstacles];
+  DistanceCache& micro_distance_cache = micro_distance_cache_[query_region][query_obstacles];
+  ExactDistanceCache& exact_distance_cache = exact_distance_cache_[query_region][query_obstacles];
+  DistanceCacheEntry*& tls_last_cache_entry = tls_last_cache_entries_[query_region][query_obstacles];
+
   // Handle reuse results first before acquiring any locks.
   // It is already up to the caller using reuse results to ensure the costmap
   // hasn't updated in-between calls, so it is pointless to acquire the lock to
@@ -744,10 +767,10 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     // Do not check if the entry is in the query region still, it is assumed
     // the caller wants to ignore the potential error this would cause, as this
     // interface is mainly useful for very small perturbations.
-    if (tls_last_cache_entries_[query_region][query_obstacles])
+    if (tls_last_cache_entry)
     {
       double distance = handleDistanceInteriorCollisions(
-          *tls_last_cache_entries_[query_region][query_obstacles],
+          *tls_last_cache_entry,
           pose);
       if (track_statistics)
       {
@@ -840,13 +863,13 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   }
 
   DistanceCacheKey exact_cache_key(pose, query_region, query_obstacles);
-  auto exact_cache_entry = exact_distance_cache_.find(exact_cache_key);
-  if (exact_cache_entry != exact_distance_cache_.end())
+  auto exact_cache_entry = exact_distance_cache.find(exact_cache_key);
+  if (exact_cache_entry != exact_distance_cache.end())
   {
     double distance = exact_cache_entry->second.distance;
     // Be sure to update the TLS last cache entry.
     // We do not need the write lock to update thread local storage.
-    tls_last_cache_entries_[query_region][query_obstacles] = &exact_cache_entry->second;
+    tls_last_cache_entry = &exact_cache_entry->second;
     if (track_statistics)
     {
       exact_hits_since_clear_.fetch_add(1, std::memory_order_relaxed);
@@ -867,9 +890,9 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   RegionsOfInterestAtPose rois(query_region, query_region_scale_, pose);
 
   DistanceCacheKey milli_cache_key(pose, query_region, query_obstacles, pose_milli_bins_per_meter_, pose_milli_bins_per_radian_);
-  auto milli_cache_entry = milli_distance_cache_.find(milli_cache_key);
+  auto milli_cache_entry = milli_distance_cache.find(milli_cache_key);
   bool milli_hit = false;
-  if (milli_cache_entry != milli_distance_cache_.end() &&
+  if (milli_cache_entry != milli_distance_cache.end() &&
       rois.distanceCacheEntryInside(milli_cache_entry->second))
   {
     double distance = handleDistanceInteriorCollisions(
@@ -879,7 +902,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     {
       // Be sure to update the TLS last cache entry.
       // We do not need the write lock to update thread local storage.
-      tls_last_cache_entries_[query_region][query_obstacles] = &milli_cache_entry->second;
+      tls_last_cache_entry = &milli_cache_entry->second;
       if (track_statistics)
       {
         fast_milli_hits_since_clear_.fetch_add(1, std::memory_order_relaxed);
@@ -903,9 +926,9 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   }
 
   DistanceCacheKey micro_cache_key(pose, query_region, query_obstacles, pose_micro_bins_per_meter_, pose_micro_bins_per_radian_);
-  auto micro_cache_entry = micro_distance_cache_.find(micro_cache_key);
+  auto micro_cache_entry = micro_distance_cache.find(micro_cache_key);
   bool micro_hit = false;
-  if (micro_cache_entry != micro_distance_cache_.end() &&
+  if (micro_cache_entry != micro_distance_cache.end() &&
       rois.distanceCacheEntryInside(micro_cache_entry->second))
   {
     double distance = handleDistanceInteriorCollisions(
@@ -915,7 +938,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     {
       // Be sure to update the TLS last cache entry.
       // We do not need the write lock to update thread local storage.
-      tls_last_cache_entries_[query_region][query_obstacles] = &micro_cache_entry->second;
+      tls_last_cache_entry = &micro_cache_entry->second;
       if (track_statistics)
       {
         fast_micro_hits_since_clear_.fetch_add(1, std::memory_order_relaxed);
@@ -945,8 +968,8 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   // cases.
   if (!milli_hit && !micro_hit)
   {
-    auto cache_entry = distance_cache_.find(cache_key);
-    if (cache_entry != distance_cache_.end() &&
+    auto cache_entry = distance_cache.find(cache_key);
+    if (cache_entry != distance_cache.end() &&
         rois.distanceCacheEntryInside(cache_entry->second))
     {
       // Cache hit, find the distance between the mesh triangle at the new pose
@@ -968,16 +991,16 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
   // Check the distance from the last cache entry too, and use it if it is a
   // better match. This is especialy useful if we miss every cache, but have a
   // last entry, and the queries are being done on a path.
-  if (tls_last_cache_entries_[query_region][query_obstacles] &&
-      rois.distanceCacheEntryInside(*tls_last_cache_entries_[query_region][query_obstacles]))
+  if (tls_last_cache_entry &&
+      rois.distanceCacheEntryInside(*tls_last_cache_entry))
   {
     double last_entry_distance = handleDistanceInteriorCollisions(
-        *tls_last_cache_entries_[query_region][query_obstacles],
+        *tls_last_cache_entry,
         pose);
     if (last_entry_distance < pose_distance)
     {
       pose_distance = last_entry_distance;
-      tls_last_cache_entries_[query_region][query_obstacles]->setupResult(&result);
+      tls_last_cache_entry->setupResult(&result);
     }
   }
 
@@ -1072,11 +1095,21 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
       unique_lock write_lock(upgrade_mutex_);
       // While it may seem expensive to copy the cache entries into the
       // caches, it prevents cache aliasing and avoids dynamic memory.
-      distance_cache_[cache_key] = new_entry;
-      micro_distance_cache_[micro_cache_key] = new_entry;
-      milli_distance_cache_[milli_cache_key] = new_entry;
-      exact_distance_cache_[exact_cache_key] = new_entry;
-      tls_last_cache_entries_[query_region][query_obstacles] = &exact_distance_cache_[exact_cache_key];
+      // The cache entries are always immutable to allow the last cache to
+      // refer to them by reference and to avoid dirting processor caches
+      // needlessly, as any cache entry for a bin is just as good as any other.
+      if (distance_cache.find(cache_key) == distance_cache.end())
+        distance_cache[cache_key] = new_entry;
+      if (milli_distance_cache.find(milli_cache_key) == milli_distance_cache.end())
+        milli_distance_cache[milli_cache_key] = new_entry;
+      if (micro_distance_cache.find(micro_cache_key) == micro_distance_cache.end())
+        micro_distance_cache[micro_cache_key] = new_entry;
+      // It is impossible for there to be an exact cache entry for this
+      // exact_cache_key as we would have gone down one of the fast paths
+      // above.
+      assert(exact_distance_cache.find(exact_cache_key) == exact_distance_cache.end());
+      exact_distance_cache[exact_cache_key] = new_entry;
+      tls_last_cache_entry = &exact_distance_cache[exact_cache_key];
     }
   }
   else
@@ -1088,7 +1121,7 @@ double Costmap3DQuery::calculateDistance(const geometry_msgs::Pose& pose,
     // must set the last cache to nullptr to prevent erroneously using some
     // other result.
     // No need to lock TLS
-    tls_last_cache_entries_[query_region][query_obstacles] = nullptr;
+    tls_last_cache_entry = nullptr;
   }
 
   if (track_statistics)

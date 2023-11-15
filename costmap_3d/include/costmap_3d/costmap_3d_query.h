@@ -329,6 +329,16 @@ protected:
    */
   virtual bool needCheckCostmap(std::shared_ptr<const octomap::OcTree> new_octree = nullptr);
 
+  /** @brief Check and invalidate TLS if necessary.
+   *
+   * Because checkCostmap will only invalidate instance-wide state, TLS state
+   * must be checked on every query prior to using the TLS cache to see if it
+   * is still valid. This is because the thread checkCostmap ends up
+   * invalidating instance-wide state runs on can not see the TLS of other
+   * threads (by design) Checking TLS state is lockless so this is cheap.
+   */
+  virtual void checkTLS();
+
   /** @brief Update the mesh to use for queries. */
   virtual void updateMeshResource(const std::string& mesh_resource, double padding = 0.0);
 
@@ -715,13 +725,13 @@ private:
   /**
    * The distance cache allows us to find a very good distance guess quickly.
    * The cache memorizes to a hash table for a pose rounded to the number of
-   * bins the mesh triangle and octomap box pair for the last distance query
+   * bins the mesh triangle and octomap box pair for the first distance query
    * in that pose bin. The distance is recalculated with the new pose, and
    * used as the starting guess to radically prune the search tree for
    * distance queries. This results in no loss of correctness and a huge
    * speed-up when distance queries are over the same space.
    */
-  DistanceCache distance_cache_;
+  DistanceCache distance_cache_[MAX][OBSTACLES_MAX];
   /**
    * Whether the caller wans 2D mode for distance cache thresholds.
    * When in 2D mode, the cache thresholds can be tighter and are calculated
@@ -744,7 +754,7 @@ private:
    * milli_cache_threshold_
    */
   double milli_cache_threshold_;
-  DistanceCache milli_distance_cache_;
+  DistanceCache milli_distance_cache_[MAX][OBSTACLES_MAX];
   /**
    * The micro-distance cache allows a very fast path when the nearest
    * obstacle is more than a threshold of distance away. This results in a
@@ -752,11 +762,11 @@ private:
    * micro_cache_threshold_
    */
   double micro_cache_threshold_;
-  DistanceCache micro_distance_cache_;
+  DistanceCache micro_distance_cache_[MAX][OBSTACLES_MAX];
   // Immediately return the distance for an exact duplicate query
   // This avoid any calculation in the case that the calculation has been done
   // since the costmap was updated.
-  ExactDistanceCache exact_distance_cache_;
+  ExactDistanceCache exact_distance_cache_[MAX][OBSTACLES_MAX];
   unsigned int last_layered_costmap_update_number_;
   //! Distance cache bins per meter for binning the pose's position
   unsigned int pose_bins_per_meter_;
