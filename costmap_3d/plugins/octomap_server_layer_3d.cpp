@@ -76,6 +76,7 @@ void OctomapServerLayer3D::initialize(LayeredCostmap3D* parent, std::string name
   erase_bbx_srv_name_ = srv_prefix + "erase_bbx";
   map_topic_ = pnh_.param("map_topic", topic_prefix + "octomap_binary");
   map_update_topic_ = pnh_.param("map_update_topic", map_topic_ + "_updates");
+  map_update_queue_size_ = pnh_.param("map_update_queue_size", 30);
   double data_valid_duration = pnh_.param("data_valid_duration", 0.0);
   data_valid_duration_ = ros::Duration(data_valid_duration);
 
@@ -181,7 +182,7 @@ void OctomapServerLayer3D::subscribeUpdatesUnlocked()
   first_full_map_update_received_ = false;
   resub_pending_ = false;
   num_map_updates_ = 0;
-  map_update_sub_ = pnh_.subscribe<octomap_msgs::OctomapUpdate>(map_update_topic_, 10,
+  map_update_sub_ = pnh_.subscribe<octomap_msgs::OctomapUpdate>(map_update_topic_, map_update_queue_size_,
                                                                 std::bind(&OctomapServerLayer3D::mapUpdateCallback,
                                                                           this, std::placeholders::_1));
 }

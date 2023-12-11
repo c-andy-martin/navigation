@@ -103,6 +103,7 @@ protected:
   ros::ServiceClient erase_bbx_client_;
   ros::Subscriber map_sub_;
   ros::Subscriber map_update_sub_;
+  size_t map_update_queue_size_;
   bool using_updates_;
   bool active_;
   bool first_full_map_update_received_;
