@@ -553,7 +553,7 @@ private:
         // Note: if this function needs to be optimized in the future, it could
         // use __builtin_clz. The initial use case of this function only calls
         // it for every main distance cache entry, which is small. Therefore
-        // a standard C++ implementation was choosen.
+        // a standard C++ implementation was chosen.
         unsigned int d = static_cast<unsigned int>(std::round(std::log2(
                     octree_space.getNodeSize(0) / octomap_box->side[0])));
         const auto& box_center = octomap_box_tf.translation();
