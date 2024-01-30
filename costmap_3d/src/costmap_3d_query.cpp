@@ -566,7 +566,7 @@ double Costmap3DQuery::handleDistanceInteriorCollisions(
       pose_tf,
       &distance);
 
-  // Box/triangle intersect, use penetration depth with box/halfpsace model.
+  // Box/triangle intersect, use penetration depth with box/halfspace model.
   if (distance < 0.0)
   {
     distance = boxHalfspaceSignedDistance(
