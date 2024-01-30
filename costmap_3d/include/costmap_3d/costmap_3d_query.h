@@ -441,10 +441,10 @@ private:
       rv.position.y = static_cast<double>(static_cast<int64_t>(pose.position.y * bins_per_meter)) / bins_per_meter;
       rv.position.z = static_cast<double>(static_cast<int64_t>(pose.position.z * bins_per_meter)) / bins_per_meter;
 
-      // Speed up the orientation binning by rounding the cayley transform of
-      // the quaternion versor instead of binning by euler angles. It is more
-      // expensive to get the euler angles as it requires several atan2
-      // operations. Getting the cayley transform (and its inverse) requires
+      // Speed up the orientation binning by rounding the Cayley transform of
+      // the quaternion versor instead of binning by Euler angles. It is more
+      // expensive to get the Euler angles as it requires several atan2
+      // operations. Getting the Cayley transform (and its inverse) requires
       // negating the versor if the scalar is negative, then a few simple
       // division/multiplication operations. The rounding error is fairly
       // uniform across SO(3). For more information, see:
@@ -453,8 +453,8 @@ private:
       //
       // The old technique exactly matches what the above calls 'ZYX', and what
       // is implemented below is the 'Basic Cayley'. If we ever find that the
-      // cayley transform is introducing too much angular error, another
-      // reasonable comprimise between runtime and accuracy is what the above
+      // Cayley transform is introducing too much angular error, another
+      // reasonable compromise between runtime and accuracy is what the above
       // calls the 'Basic Harmonic Mean' method.
       double w = pose.orientation.w;
       Eigen::Vector3f v(
