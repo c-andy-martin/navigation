@@ -34,8 +34,8 @@
  *
  * Author: C. Andy Martin
  *********************************************************************/
-#ifndef COSTMAP_3D_INTERIOR_COLLISON_LUT_H_
-#define COSTMAP_3D_INTERIOR_COLLISON_LUT_H_
+#ifndef COSTMAP_3D_INTERIOR_COLLISION_LUT_H_
+#define COSTMAP_3D_INTERIOR_COLLISION_LUT_H_
 
 #include <memory>
 #include <vector>
@@ -223,4 +223,4 @@ S InteriorCollisionLUT<S>::distance(
 
 }  // namespace costmap_3d
 
-#endif  // COSTMAP_3D_INTERIOR_COLLISON_LUT_H_
+#endif  // COSTMAP_3D_INTERIOR_COLLISION_LUT_H_
