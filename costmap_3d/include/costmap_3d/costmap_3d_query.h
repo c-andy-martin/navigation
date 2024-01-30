@@ -685,7 +685,7 @@ private:
   /**
    * The milli-distance cache allows a very fast path when the nearest
    * obstacle is more than a threshold of distance away. This results in a
-   * massive speed up for cases where the nearest obstacle is futher than the
+   * massive speed up for cases where the nearest obstacle is further than the
    * milli_cache_threshold_
    */
   double milli_cache_threshold_;
@@ -693,7 +693,7 @@ private:
   /**
    * The micro-distance cache allows a very fast path when the nearest
    * obstacle is more than a threshold of distance away. This results in a
-   * massive speed up for cases where the nearest obstacle is futher than the
+   * massive speed up for cases where the nearest obstacle is further than the
    * micro_cache_threshold_
    */
   double micro_cache_threshold_;
