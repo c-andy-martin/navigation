@@ -172,13 +172,13 @@ public:
    * The region of the map considered is limited by the query_region.
    *
    * It is assumed the pose is in the frame of the costmap.
-   * This returns the signed distance. For non-pentration cases, the return
+   * This returns the signed distance. For non-penetration cases, the return
    * value is the same as footprintDistance. For penetrating collisions, an
    * approximation of one of the negative penetration depths will be returned.
    * This approximation has the property that for most cases the derivative
    * obtained by a small perturbation in pose will point away from the
    * penetration. However, if the pose is moved enough away from the
-   * penetration, some other pentrating point may be choosen in the case of
+   * penetration, some other penetrating point may be chosen in the case of
    * multiple penetrations. This should normally result in a net negative
    * direction to the derivative, but the more penetrations the worse the
    * approximation becomes. Finding the absolute deepest penetration depth is
