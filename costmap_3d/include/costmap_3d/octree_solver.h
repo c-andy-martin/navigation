@@ -69,7 +69,7 @@ public:
   // mesh. If the box is not entirely within the mesh, this function may simply
   // return any non-negative number. This function must always return the
   // negative penetration distance when the entire box is inside the mesh. It
-  // is OK for it to miss casses when the box and the mesh touch, as those are
+  // is OK for it to miss cases when the box and the mesh touch, as those are
   // handled directly by the solver traversal.  The solver needs to know when
   // an interior collision happens (and how deep it is), but knowing that is
   // outside of its scope. It uses this function to find out if there is an
