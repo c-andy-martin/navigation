@@ -570,12 +570,12 @@ private:
     std::shared_ptr<fcl::TriangleP<FCLFloat>> mesh_triangle;
     int mesh_triangle_id;
   };
-  // Internal class to decompose a region of interst into a set of halfspaces.
+  // Internal class to decompose a region of interest into a set of halfspaces.
   // Because this internal class is used on the fast-paths, avoid dynamic memory.
   class RegionsOfInterestAtPose
   {
   public:
-    // Construct a region of interst at a pose. Internally store the set of halfspaces.
+    // Construct a region of interest at a pose. Internally store the set of halfspaces.
     RegionsOfInterestAtPose(QueryRegion query_region, const QueryRegionScale& query_region_scale, const geometry_msgs::Pose& pose)
     {
       if (query_region == LEFT || query_region == RIGHT)
