@@ -110,7 +110,7 @@ Costmap3DQuery::Costmap3DQuery(const Costmap3DConstPtr& costmap_3d,
   // It would be awesome if the Costmap3D had a way to snapshot
   // or copy-on-write. As it stands, for many scenarios involving
   // space-limited local costmaps, copying a 3D costmap will only take a
-  // couple millseconds and is better than leaving the costmap locked for
+  // couple milliseconds and is better than leaving the costmap locked for
   // an entire planning cycle.
   octree_ptr_.reset(new Costmap3D(*costmap_3d));
   updateMeshResource(mesh_resource, padding);
