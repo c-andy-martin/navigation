@@ -303,7 +303,7 @@ protected:
                                    const DistanceOptions& opts);
 
 private:
-  // Common initialization between all constrcutors
+  // Common initialization between all constructors
   void init();
   // synchronize this object for parallel queries
   upgrade_mutex upgrade_mutex_;
