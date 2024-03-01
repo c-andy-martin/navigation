@@ -935,7 +935,7 @@ bool OcTreeMeshSolver<NarrowPhaseSolver>::OcTreeMeshDistanceRecurse(
   }
 
   // Check region of interest.
-  bool entirely_inside_roi;
+  bool entirely_inside_roi = false;
   if (check_roi)
   {
     int rv = checkROI<S>(*bv1, roi_);
@@ -950,10 +950,6 @@ bool OcTreeMeshSolver<NarrowPhaseSolver>::OcTreeMeshDistanceRecurse(
       // There is no need to check any sub-region. Null out the roi for
       // subsequent recursive calls.
       entirely_inside_roi = true;
-    }
-    else
-    {
-      entirely_inside_roi = false;
     }
   }
 
