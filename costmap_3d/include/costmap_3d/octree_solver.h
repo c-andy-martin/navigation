@@ -391,17 +391,17 @@ inline S distanceOctomapOBBRSS(
 // descent uses computeChildBV on a fast-path, so it needs to run as fast as
 // possible.
 template <typename S>
-static inline void computeChildMinMax(const fcl::AABB<S>& root_bv, unsigned int i, fcl::Vector3<S>& child_min, fcl::Vector3<S>& child_max)
+static inline void computeChildMinMax(const fcl::AABB<S>& root_bv, unsigned int i, fcl::Vector3<S>* child_min, fcl::Vector3<S>* child_max)
 {
   const fcl::Vector3<S> root_bv_min = root_bv.min_;
   const fcl::Vector3<S> root_bv_max = root_bv.max_;
   const fcl::Vector3<S> root_bv_center = (root_bv_min + root_bv_max) * 0.5;
-  child_min[0] = (i&1) ? root_bv_center[0] : root_bv_min[0];
-  child_max[0] = (i&1) ? root_bv_max[0] : root_bv_center[0];
-  child_min[1] = (i&2) ? root_bv_center[1] : root_bv_min[1];
-  child_max[1] = (i&2) ? root_bv_max[1] : root_bv_center[1];
-  child_min[2] = (i&4) ? root_bv_center[2] : root_bv_min[2];
-  child_max[2] = (i&4) ? root_bv_max[2] : root_bv_center[2];
+  (*child_min)[0] = (i&1) ? root_bv_center[0] : root_bv_min[0];
+  (*child_max)[0] = (i&1) ? root_bv_max[0] : root_bv_center[0];
+  (*child_min)[1] = (i&2) ? root_bv_center[1] : root_bv_min[1];
+  (*child_max)[1] = (i&2) ? root_bv_max[1] : root_bv_center[1];
+  (*child_min)[2] = (i&4) ? root_bv_center[2] : root_bv_min[2];
+  (*child_max)[2] = (i&4) ? root_bv_max[2] : root_bv_center[2];
 }
 
 // return -1 if bv1 out of roi, 1 if in, and 0 if on.
@@ -913,7 +913,7 @@ bool OcTreeMeshSolver<NarrowPhaseSolver>::OcTreeMeshDistanceRecurse(
           if (isNodeConsideredOccupied(tree1, child))
           {
             children[nchildren] = child;
-            computeChildMinMax(*bv1, i, child_mins[nchildren], child_maxs[nchildren]);
+            computeChildMinMax(*bv1, i, &child_mins[nchildren], &child_maxs[nchildren]);
             nchildren++;
           }
         }
