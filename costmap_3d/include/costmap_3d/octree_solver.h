@@ -975,7 +975,7 @@ bool OcTreeMeshSolver<NarrowPhaseSolver>::OcTreeMeshDistanceRecurse(
     {
       const unsigned index = indices[i];
       S min_distance = distances[index];
-      if (min_distance < rel_err_factor_ * dresult_->min_distance || exact_signed_distance_ && min_distance <= 0)
+      if (min_distance < rel_err_factor_ * dresult_->min_distance || (exact_signed_distance_ && min_distance <= 0))
       {
         // Possible a better result is below, descend
         // No way to directly construct an AABB with a given min/max. Just use
