@@ -429,10 +429,6 @@ void octree_solver_test(std::size_t n, bool negative_x_roi, bool non_negative_x_
         request,
         &result);
     S dist1 = result.min_distance;
-    std::cout << " octree iteration " << i << ": "
-      << std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::high_resolution_clock::now() -start_time).count()
-      << "ns" << std::endl;
     total_time += std::chrono::high_resolution_clock::now() - start_time;
 
     // Check the result against FCL's broadphase distance
