@@ -45,6 +45,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -54,6 +55,7 @@
 #include <fcl/narrowphase/distance.h>
 #include <pcl/point_types.h>
 #include <pcl/PolygonMesh.h>
+#include <pcl/common/common.h>
 #include <pcl/filters/passthrough.h>
 #include <geometry_msgs/Pose.h>
 #include <tf2/utils.h>
@@ -389,12 +391,6 @@ protected:
                                    const DistanceOptions& opts,
                                    DistanceResult* return_result = nullptr);
 
-  /** @brief recalculate the distance cache thresholds.
-   *
-   * The caller must already hold an exclusive lock on the instance_mutex_.
-   */
-  virtual void calculateCacheDistanceThresholds();
-
 private:
   // Common initialization between all constructors
   void init();
@@ -474,12 +470,19 @@ private:
   class DistanceCacheKey
   {
   public:
-    DistanceCacheKey(
+    // Distance cache keys aren't valid until they are initialized.
+    // DistanceCacheKeys are used on the fast-path of the queries, so dynamic
+    // memory needs to be avoided. The user of the cache then will allocate
+    // a DistanceCacheKey on their stack and then have the DistanceCache
+    // initialize it separately.
+    DistanceCacheKey() = default;
+
+    void initialize(
         const geometry_msgs::Pose& pose,
         QueryRegion query_region,
-        bool query_obstacles,
-        int bins_per_meter,
-        int bins_per_rotation)
+        QueryObstacles query_obstacles,
+        int bins_per_meter = 0,
+        int bins_per_rotation = 0)
     {
       // If bins_per_meter or bins_per_rotation are zero, the cache is disabled.
       // The key is allowed to be calculated anyway as an exact key (and this
@@ -493,14 +496,6 @@ private:
       {
         binned_pose_ = pose;
       }
-      query_region_ = query_region;
-      query_obstacles_ = query_obstacles;
-      hash_ = hash_value();
-    }
-    // Constructor for the "exact" cache where the poses are not binned
-    DistanceCacheKey(const geometry_msgs::Pose& pose, QueryRegion query_region, bool query_obstacles)
-    {
-      binned_pose_ = pose;
       query_region_ = query_region;
       query_obstacles_ = query_obstacles;
       hash_ = hash_value();
@@ -543,7 +538,7 @@ private:
           binned_pose_.position.x,
           binned_pose_.position.y,
           binned_pose_.position.z,
-          {.uint = {static_cast<uint64_t>(query_region_) << 8 | static_cast<uint64_t>(query_obstacles_)}},
+          {.uint = (static_cast<uint64_t>(query_region_) << 8 | static_cast<uint64_t>(query_obstacles_))},
       };
       uint64_t primes[8] = {
           30011,
@@ -727,7 +722,7 @@ private:
     // Test if the given distance cache entry is inside the region.
     // Regions are always inclusive. A voxel on the region boundary is
     // considered "inside".
-    bool distanceCacheEntryInside(const DistanceCacheEntry& cache_entry)
+    bool distanceCacheEntryInside(const DistanceCacheEntry& cache_entry) const
     {
       const auto& box = cache_entry.octomap_box;
       const auto& box_center = cache_entry.octomap_box_center;
@@ -762,10 +757,429 @@ private:
   double handleDistanceInteriorCollisions(
       const DistanceCacheEntry& cache_entry,
       const geometry_msgs::Pose& pose);
-  using DistanceCache =
+  using DistanceCacheMap =
     std::unordered_map<DistanceCacheKey, DistanceCacheEntry, DistanceCacheKeyHash, DistanceCacheKeyEqual>;
-  using ExactDistanceCache =
-    std::unordered_map<DistanceCacheKey, DistanceCacheEntry, DistanceCacheKeyHash, DistanceCacheKeyEqual>;
+  template <bool exact_cache = false>
+  class DistanceCacheImpl
+  {
+  public:
+    using DistanceFunction = std::function<double(const DistanceCacheEntry&, const geometry_msgs::Pose&)>;
+
+    void setDistanceFunction(DistanceFunction distance_function)
+    {
+      distance_function_ = distance_function;
+    }
+
+    void setRobotMeshPoints(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& robot_mesh_points)
+    {
+      if (exact_cache)
+      {
+        // exact caches don't need the robot mesh points
+        return;
+      }
+      // Called sparingly, not on normal planning path, so just grab write lock
+      unique_lock cache_write_lock(mutex_);
+      robot_mesh_points_ = robot_mesh_points;
+      calculateDistanceThresholds();
+    }
+
+    void setBinSize(unsigned int bins_per_meter, unsigned int bins_per_rotation)
+    {
+      if (exact_cache)
+      {
+        // exact caches don't need bins
+        return;
+      }
+      bool changed = false;
+      {
+        shared_lock cache_read_lock(mutex_);
+        if (bins_per_meter != bins_per_meter_ || bins_per_rotation != bins_per_rotation_)
+        {
+          changed = true;
+        }
+      }
+      if (changed)
+      {
+        unique_lock cache_write_lock(mutex_);
+        if (bins_per_meter != bins_per_meter_ || bins_per_rotation != bins_per_rotation_)
+        {
+          cache_.clear();
+          bins_per_meter_ = bins_per_meter;
+          bins_per_rotation_ = bins_per_rotation;
+          ROS_INFO_STREAM(debug_prefix_ << "distance cache bins per meter: " << bins_per_meter_);
+          ROS_INFO_STREAM(debug_prefix_ << "distance cache bins per rotation: " << bins_per_rotation);
+          calculateDistanceThresholds();
+        }
+      }
+    }
+
+    void setThresholdParameters(bool threshold_two_d_mode, double threshold_factor)
+    {
+      if (exact_cache)
+      {
+        // exact caches don't need thresholds, just skip as printing them is pointless
+        return;
+      }
+      bool changed = false;
+      {
+        shared_lock cache_read_lock(mutex_);
+        if (threshold_two_d_mode_ != threshold_two_d_mode || threshold_factor_ != threshold_factor)
+        {
+          changed = true;
+        }
+      }
+      if (changed)
+      {
+        unique_lock cache_write_lock(mutex_);
+        if (threshold_two_d_mode_ != threshold_two_d_mode || threshold_factor_ != threshold_factor)
+        {
+          threshold_two_d_mode_ = threshold_two_d_mode;
+          threshold_factor_ = threshold_factor;
+          calculateDistanceThresholds();
+        }
+      }
+    }
+
+    void calculateDistanceThresholds()
+    {
+      if (exact_cache)
+      {
+        // exact caches don't need thresholds, just skip as printing them is pointless
+        return;
+      }
+      if (!robot_mesh_points_)
+      {
+        ROS_INFO_STREAM(debug_prefix_ << "distance cache: skipping threshold calculation: no robot mesh points");
+        return;
+      }
+      // The distance thresholds must be greater than the maximum translation
+      // error plus the maximum rotation error, otherwise the query may not
+      // return a collision when one is actually present. In a robot with full
+      // three-dimensional movement this would equate to the length of the
+      // diagonal of a bin plus the chord length corresponding to the size of a
+      // rotational bin given the maximum radius of the robot mesh. For
+      // two-dimensional movement of a robot on a plane aligned with the
+      // costmap, the threshold is lower at only the diagonal of the bin
+      // projected into the plane as a square and the chord length given the
+      // radius of the robot mesh projected into the plane (the robot footprint
+      // radius).
+      Eigen::Vector4f origin(0.0, 0.0, 0.0, 0.0), max_pt(0.0, 0.0, 0.0, 0.0);
+      if (threshold_two_d_mode_)
+      {
+        // Create a 2D version of the mesh cloud by truncating the Z value.
+        pcl::PointCloud<pcl::PointXYZ> mesh_points_2d(*robot_mesh_points_);
+        for (auto& point : mesh_points_2d)
+        {
+          point.z = 0.0;
+        }
+        pcl::getMaxDistance(mesh_points_2d, origin, max_pt);
+      }
+      else
+      {
+        pcl::getMaxDistance(*robot_mesh_points_, origin, max_pt);
+      }
+      const Eigen::Vector3f max_pt3 = max_pt.head<3>();
+      double mesh_radius = max_pt3.norm();
+      ROS_INFO_STREAM(debug_prefix_ << "distance cache mesh radius: " << mesh_radius << "m");
+      if (bins_per_meter_ > 0)
+      {
+        const double diagonal_factor = threshold_two_d_mode_ ? std::sqrt(2.0) : std::sqrt(3.0);
+        // Because binPoseAngularDistanceLimit measures the maximum rotational size
+        // of a bin, it may return up to 2 * M_PI, but the maximum chord length is
+        // at an angle of M_PI, so do not use an angular error higher than M_PI.
+        const double max_angular_error = std::min(M_PI, binPoseAngularDistanceLimit(
+            bins_per_rotation_, threshold_two_d_mode_));
+        // Add the diagonal length of positional error plus the chord length of the
+        // maximum angular error.
+        threshold_ = diagonal_factor / bins_per_meter_ +
+          2.0 * mesh_radius * std::sin(0.5 * max_angular_error);
+        threshold_ *= threshold_factor_;
+        ROS_INFO_STREAM(debug_prefix_ << "distance cache threshold: " << threshold_ << "m");
+      }
+      else
+      {
+        threshold_ = std::numeric_limits<double>::infinity();
+      }
+    }
+
+    inline void initializeKey(
+        const geometry_msgs::Pose& pose,
+        const QueryRegion query_region,
+        const QueryObstacles query_obstacles,
+        DistanceCacheKey* key_ptr)
+    {
+      // Do not grab the mutex at all, if the caller alters the number of bins
+      // per pose this key will just bin wrong, which does mean the cache will
+      // miss, but because a cache is only to improve performance there is no
+      // error introduced by this. Grabbing the lock is more expensive as it
+      // holds off other writers to the cache while binning the pose.
+      key_ptr->initialize(pose, query_region, query_obstacles, bins_per_meter_, bins_per_rotation_);
+    }
+
+    // First return value is true when cache is hit.
+    // Second return value is true for a fast hit.
+    std::pair<bool, bool> checkCache(
+        const DistanceCacheKey& key,
+        const geometry_msgs::Pose& pose,
+        DistanceCacheEntry* cache_entry_ptr,
+        double* distance_ptr,
+        const RegionsOfInterestAtPose* rois_ptr = nullptr,
+        bool track_statistics = false,
+        const std::chrono::high_resolution_clock::time_point* start_time_ptr = nullptr,
+        std::atomic<unsigned int>* fast_hits_since_clear_ptr = nullptr,
+        std::atomic<uint64_t>* fast_hits_since_clear_us_ptr = nullptr,
+        bool exact_signed_distance = false,
+        bool directly_use_cache_when_above_threshold = false)
+    {
+      // Be sure the entry is cleared in case the caller is reusing the same
+      // entry, otherwise there will be a false hit.
+      cache_entry_ptr->clear();
+      if (exact_cache || (bins_per_meter_ > 0 && bins_per_rotation_ > 0))
+      {
+        shared_lock cache_read_lock(mutex_);
+        auto found_entry = cache_.find(key);
+        if (found_entry != cache_.end())
+        {
+          *cache_entry_ptr = found_entry->second;
+        }
+      }
+      if (*cache_entry_ptr && (!rois_ptr || rois_ptr->distanceCacheEntryInside(*cache_entry_ptr)))
+      {
+        // Cache hit, find the distance between the mesh triangle at the new
+        // pose and the octomap box, and use this as our initial guess in the
+        // result. This greatly prunes the search tree, yielding a big increase
+        // in runtime performance.
+        assert(distance_function_);
+        double distance = distance_function_(*cache_entry_ptr, pose);
+        *distance_ptr = distance;
+        // Fast path.
+        // Take the fast path on a hit in an exact cache, or
+        // when not in exact signed distance and there is a collision or
+        // when directly using the cache above the threshold and the cache
+        // entry is still valid and above the threshold
+        if (exact_cache ||
+            (!exact_signed_distance && distance <= 0.0) ||
+            (directly_use_cache_when_above_threshold &&
+            std::isfinite(cache_entry_ptr->distance) && (
+              cache_entry_ptr->distance > threshold_ ||
+              distance > threshold_)))
+        {
+          if (track_statistics)
+          {
+            fast_hits_since_clear_ptr->fetch_add(1, std::memory_order_relaxed);
+            fast_hits_since_clear_us_ptr->fetch_add(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                  std::chrono::high_resolution_clock::now() - *start_time_ptr).count(),
+                std::memory_order_relaxed);
+          }
+          return std::make_pair(true, true);
+        }
+        return std::make_pair(true, false);
+      }
+      return std::make_pair(false, false);
+    }
+
+    void updateCache(const DistanceCacheKey& key, const DistanceCacheEntry& entry)
+    {
+      if (exact_cache || (bins_per_meter_ > 0 && bins_per_rotation_ > 0))
+      {
+        // While it may seem expensive to copy the cache entries into the
+        // caches, it prevents cache aliasing and avoids dynamic memory.
+        unique_lock cache_write_lock(mutex_);
+        cache_[key] = entry;
+      }
+    }
+
+    // Delete any distance cache entries that have had their corresponding
+    // octomap cells removed. It is fine to keep entries in the presence of
+    // additions, as the entry only defines an upper bound. Because the size of
+    // the tree is limited, the size of the cache has a natural limit. If this
+    // limit is ever too large, a separate cache size may need to be set. Also
+    // invalidate the fast path for any cache entries that are left. This
+    // method is only useful for caches that are primarily used to limit the
+    // tree, such as the main distance cache and the milli distance cache.
+    // Other caches are unlikely to benefit from this and should simply be
+    // cleared on an update.
+    void handleCostmapUpdate(
+        const octomap::OcTree* octree_ptr,
+        const octomap::OcTree* nonlethal_octree_ptr)
+    {
+      unique_lock cache_write_lock(mutex_);
+      size_t start_size = cache_.size();
+      auto it = cache_.begin();
+      while (it != cache_.end())
+      {
+        bool erase = true;
+        Costmap3DIndex index;
+        unsigned int depth;
+        const octomap::OcTree* octree_to_query;
+        if (it->first.getQueryObstacles() == NONLETHAL_ONLY)
+        {
+          octree_to_query = nonlethal_octree_ptr;
+        }
+        else
+        {
+          octree_to_query = octree_ptr;
+        }
+        if (it->second.getCostmapIndexAndDepth(*octree_to_query, &index, &depth))
+        {
+          unsigned int found_depth;
+          auto* node = octree_to_query->search(index, depth, &found_depth);
+          if (node &&
+              !octree_to_query->nodeHasChildren(node) &&
+              depth == found_depth &&
+              octree_to_query->isNodeOccupied(node))
+          {
+            // The node exists and has no children (so its a leaf and not an
+            // inner node), is at the correct depth and is considered occupied
+            // for the proper octree. Keep this entry.
+            erase = false;
+          }
+        }
+
+        if (erase)
+        {
+          it = cache_.erase(it);
+        }
+        else
+        {
+          // While the entry is still good for setting an upper distance bound
+          // on the octree solver, it is no good for the fast-path. This is
+          // because the new costmap may have a closer box than previously.
+          // Therefore invalidate this entry for the fast-path by setting the
+          // recorded distance to infinity. The fast-path is only taken for
+          // finite recorded distance.
+          it->second.distance = std::numeric_limits<FCLFloat>::infinity();
+          ++it;
+        }
+      }
+      ROS_DEBUG_STREAM_NAMED("query_distance_cache",
+          debug_prefix_ << "distance cache removed " << start_size - cache_.size() << " entries");
+    }
+
+    void clear()
+    {
+      unique_lock cache_write_lock(mutex_);
+      cache_.clear();
+    }
+
+    void printDistanceCacheDebug()
+    {
+      ROS_DEBUG_STREAM_NAMED(
+          "query_distance_cache", debug_prefix_ << "distance cache: " <<
+          " size: " << cache_.size() <<
+          " bucket count: " << cache_.bucket_count() <<
+          " badness: " << cache_map_badness());
+    }
+
+    void setDebugPrefix(const std::string& debug_prefix)
+    {
+      debug_prefix_ = debug_prefix;
+    }
+
+  private:
+    double cache_map_badness()
+    {
+      double ratio = cache_.size();
+      ratio /= cache_.bucket_count();
+
+      double cost = 0.0;
+      for (auto const& entry : cache_)
+        cost += cache_.bucket_size(cache_.bucket(entry.first));
+      cost /= cache_.size();
+
+      return std::max(0.0, cost / (1 + ratio) - 1);
+    }
+
+    shared_mutex mutex_;
+    std::string debug_prefix_;
+    // Zero means disabled
+    unsigned int bins_per_meter_ = 0;
+    unsigned int bins_per_rotation_ = 0;
+    /**
+     * Whether the caller wants 2D mode for distance cache thresholds.
+     * When in 2D mode, the cache thresholds can be tighter and are calculated
+     * differently than when not in 2D mode. The default is to run in 3D mode.
+     * The milli and micro caches may be much more effective in 2D mode for a 2D
+     * robot, as only the radius of the robot matters if query poses will be for
+     * 2D navigation.
+     */
+    bool threshold_two_d_mode_ = false;
+    /**
+     * Safety factor for distance cache thresholds.
+     * The minimum value that prevents false-negative collisions is increased by
+     * this factor.
+     */
+    double threshold_factor_ = 1.05;
+    /**
+     * The distance cache allows a very fast path when the nearest obstacle is
+     * more than a threshold of distance away. This results in a massive speed
+     * up for cases where the nearest obstacle is further than the threshold_.
+     * This value is automatically calculated based on the robot mesh, the
+     * desired mode (2D or 3D) and the threshold_factor_.
+     */
+    double threshold_ = std::numeric_limits<double>::infinity();
+    DistanceCacheMap cache_;
+    DistanceFunction distance_function_;
+    pcl::PointCloud<pcl::PointXYZ>::ConstPtr robot_mesh_points_;
+  };
+
+  using DistanceCache = DistanceCacheImpl<false>;
+  using ExactDistanceCache = DistanceCacheImpl<true>;
+
+  // Version of DistanceCache which does not bin on pose, but just remembers
+  // the previous cache entry for a particular query mode. Includes a
+  // DistanceCache member and wraps it in place of inheritance for speed.
+  class LastDistanceCache
+  {
+  public:
+    void setDistanceFunction(ExactDistanceCache::DistanceFunction distance_function)
+    {
+      cache_.setDistanceFunction(distance_function);
+    }
+
+    // Returns true on a hit.
+    // Fast hits make no sense for a last distance cache, so return a bool.
+    bool checkCache(
+        const DistanceCacheKey& cache_key,
+        const geometry_msgs::Pose& pose,
+        DistanceCacheEntry* cache_entry_ptr,
+        double* distance_ptr,
+        const RegionsOfInterestAtPose* rois_ptr = nullptr)
+    {
+      // Reuse ExactDistanceCache, but provide a key with an all-zero pose so
+      // the previous call results are re-used for a given query_region and
+      // query_obstacles for any pose.
+      return cache_.checkCache(
+          cache_key,
+          pose,
+          cache_entry_ptr,
+          distance_ptr,
+          rois_ptr).first;
+    }
+
+    void updateCache(const DistanceCacheKey& key, const DistanceCacheEntry& entry)
+    {
+      cache_.updateCache(key, entry);
+    }
+
+    inline void initializeKey(
+        const QueryRegion query_region,
+        const QueryObstacles query_obstacles,
+        DistanceCacheKey* key_ptr)
+    {
+      key_ptr->initialize(geometry_msgs::Pose(), query_region, query_obstacles);
+    }
+
+    void clear()
+    {
+      cache_.clear();
+    }
+
+  private:
+    ExactDistanceCache cache_;
+  };
+
   /**
    * The distance cache allows us to find a very good distance guess quickly.
    * The cache memorizes to a hash table for a pose rounded to the number of
@@ -776,60 +1190,16 @@ private:
    * speed-up when distance queries are over the same space.
    */
   DistanceCache distance_cache_;
-  shared_mutex distance_cache_mutex_;
-  // Last entries are useful for setting good bounds on misses.
-  DistanceCacheEntry last_distance_cache_entries_[MAX][OBSTACLES_MAX];
-  /**
-   * Whether the caller wants 2D mode for distance cache thresholds.
-   * When in 2D mode, the cache thresholds can be tighter and are calculated
-   * differently than when not in 2D mode. The default is to run in 3D mode.
-   * The milli and micro caches may be much more effective in 2D mode for a 2D
-   * robot, as only the radius of the robot matters if query poses will be for
-   * 2D navigation.
-   */
-  bool threshold_two_d_mode_ = false;
-  /**
-   * Safety factor for distance cache thresholds.
-   * The minimum value that prevents false-negative collisions is increased by
-   * this factor.
-   */
-  double threshold_factor_ = 1.05;
-  /**
-   * The milli-distance cache allows a very fast path when the nearest
-   * obstacle is more than a threshold of distance away. This results in a
-   * massive speed up for cases where the nearest obstacle is further than the
-   * milli_cache_threshold_
-   */
-  double milli_cache_threshold_;
   DistanceCache milli_distance_cache_;
-  shared_mutex milli_distance_cache_mutex_;
-  /**
-   * The micro-distance cache allows a very fast path when the nearest
-   * obstacle is more than a threshold of distance away. This results in a
-   * massive speed up for cases where the nearest obstacle is further than the
-   * micro_cache_threshold_
-   */
-  double micro_cache_threshold_;
   DistanceCache micro_distance_cache_;
-  shared_mutex micro_distance_cache_mutex_;
-  // Immediately return the distance for an exact duplicate query
-  // This avoid any calculation in the case that the calculation has been done
-  // since the costmap was updated.
+  // Use an exact cache to immediately return the distance for an exact
+  // duplicate query. The costmap is often queried for the same pose, for
+  // instance by the path planner and by the path validator.
   ExactDistanceCache exact_distance_cache_;
-  shared_mutex exact_distance_cache_mutex_;
+  // If all other caches are missed, using the previous result provides a decent
+  // bound and is better than no bound at all.
+  LastDistanceCache last_distance_cache_;
   unsigned int last_layered_costmap_update_number_;
-  //! Distance cache bins per meter for binning the pose's position
-  unsigned int pose_bins_per_meter_;
-  //! Distance cache bins per rotation for binning the pose's orientation
-  unsigned int pose_bins_per_rotation_;
-  //! Milli-distance cache bins per meter for binning the pose's position
-  unsigned int pose_milli_bins_per_meter_;
-  //! Milli-distance cache bins per rotation for binning the pose's orientation
-  unsigned int pose_milli_bins_per_rotation_;
-  //! Micro-distance cache bins per meter for binning the pose's position
-  unsigned int pose_micro_bins_per_meter_;
-  //! Micro-distance cache bins per rotation for binning the pose's orientation
-  unsigned int pose_micro_bins_per_rotation_;
   // Statistics gathered between clearing cycles
   void printStatistics();
   void clearStatistics();
